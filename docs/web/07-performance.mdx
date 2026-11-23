@@ -1,0 +1,648 @@
+---
+title: 07 · 性能与 Core Web Vitals
+description: 按用户能感知的顺序讲性能：首屏资源怎么排队、点击为什么卡住、长列表怎么省着画、下一跳怎么提前准备——每个毛病都走一遍「症状 → 定位 → 修复 → 验证」。
+---
+
+# 第 7 章 性能与 Core Web Vitals
+
+> **难度**：🔴 高阶 ｜ **前置**：[01 HTML 与交互](/web/01-html-interactive)、[02 CSS 布局与响应式](/web/02-css-layout-responsive) ｜ **学完你能**：拿到一个「变慢了」的页面，先说清慢在哪一环，再用最小改动修好，并拿数据证明修好了。
+
+**这一章要解决的毛病**
+
+- 首屏先是白底，两秒后主图「啪」地跳出来，用户以为页面坏了，直接退出。
+- 点了「加入购物车」半秒没动静，用户连点三下，最后加了三件。
+- 长列表一滚就发涩，手指离开后画面还在追；点进详情先白屏一秒多。
+
+这三种感受分别对应 LCP、INP、CLS。本章按用户能感知的顺序推进：**先首屏、再交互、最后渲染与度量**。每一节只解决一类问题，避免一上来就「全都优化」，改了三周却不知道到底改好了没有。
+
+## 🟢 入门：先让它跑起来
+
+### 1.1 用户的三种抱怨，就是三个指标（performance）
+
+**没它会怎样**：团队把「性能优化」当成一件事，同时上了打包拆分、图片压缩、骨架屏。三周后 LCP 从 4.2s 降到 3.9s，用户还是说「点着没反应」——真正拖后腿的是 INP，压根没人测。
+
+这句代码在演示什么：把三种「感觉」变成三个可以上报的数，先有观测再谈优化。
+
+```js
+import { onLCP, onINP, onCLS } from 'web-vitals';
+
+const report = (metric) => {
+  navigator.sendBeacon('/rum', JSON.stringify({
+    name: metric.name,       // LCP / INP / CLS
+    value: metric.value,     // 毫秒，或 CLS 的无量纲分数
+    rating: metric.rating,   // 'good' | 'needs-improvement' | 'poor'
+    id: metric.id,           // 同一次页面加载的唯一标识
+  }));
+};
+
+onLCP(report);
+onINP(report);
+onCLS(report);
+```
+
+**浏览器做了什么**：LCP 是「视口里最大的图片或文字块」绘制完成的时刻；INP 记录用户每一次点击、按键、轻触的耗时，最后取高分位数代表「最糟的常见体验」；CLS 则在页面整个生命周期里累加「元素非预期位移」的幅度。三者都按第 75 百分位统计——75% 的访问达标才算「良好」。
+
+**对比**：
+
+| 指标 | 用户原话 | 达标线（p75） | 超了是什么后果 | 主要修复方向 |
+| --- | --- | --- | --- | --- |
+| LCP | 「首页白了好久」 | ≤ 2.5s | 首屏没内容，人直接走 | 图片优先级、preload、少一层 JS |
+| INP | 「点了没反应」 | ≤ 200ms | 重复点击、误操作 | 拆长任务、降主线程占用 |
+| CLS | 「内容乱跳、点错」 | ≤ 0.1 | 点错按钮、读一半丢位置 | 图片写死宽高、字体不换行 |
+
+注意「p75 达标」不等于「每次都快」：平均值会把慢用户藏起来。所以后面所有对比只看 p75，并且移动端、桌面端分开看。
+
+另外一个常被忽略的点：**指标要能归因**。只上报一个 3.8s 没有用，得知道是谁导致的：LCP 用 PerformanceObserver 抓 `element` 定位到 DOM 节点，INP 拆成输入延迟、处理耗时、呈现延迟三段（identify-inp-causes），否则你只能猜是「脚本慢」还是「主线程本来就忙」。
+
+### 1.2 首屏资源怎么排队（optimize-image-priority）
+
+**没它会怎样**：`<img>` 的默认优先级是 low。浏览器要先解析 CSS、算完布局，才知道这张图在不在视口里，于是主图排在字体、脚本、次要图片后面。真实数据里，LCP 图片的请求常在 HTML 到达后 800ms 才发出。
+
+这段在演示什么：同一张主图，用三种写法告诉浏览器不同的事——它在哪、多急、要不要现在下。核心是两件事：主图提权（optimize-image-priority），以及扫描器看不见的背景图必须手动预加载（optimize-preload-priority）。
+
+```html
+<!-- 1. LCP 图直接写在服务端 HTML 里，并显式提权 -->
+<img src="/img/hero.avif" alt="产品主图" width="1200" height="600" fetchpriority="high" decoding="async">
+
+<!-- 2. LCP 是 CSS 背景图时，扫描器看不见，必须手动 preload -->
+<link rel="preload" as="image" href="/img/hero-bg.avif" type="image/avif" fetchpriority="high">
+
+<!-- 3. 首屏之外的轮播图：晚点来，别抢带宽 -->
+<img src="/img/carousel-2.avif" alt="" width="800" height="400" loading="lazy" fetchpriority="low">
+```
+
+**浏览器做了什么**：HTML 一落地，预加载扫描器（preload scanner）就开始扫标签里的图片地址，不必等 CSS 和 JS 执行完。`fetchpriority` 给这个扫描结果加一个提示，把主图从 low 提到 high。反过来，`loading="lazy"` 让屏外图片等到接近视口才发请求。两种提示都只在「请求还没发出」时有效，已经发出去的请求不会被改优先级。
+
+**优先级矩阵**——这张表比背 API 有用：
+
+| 资源 | 默认优先级 | 预加载扫描器能否发现 | 你该做什么 |
+| --- | --- | --- | --- |
+| 原始 HTML 里的首屏图 | Low | 能 | 加 `fetchpriority="high"`，只加一张 |
+| CSS 背景的 LCP 图 | 不适用 | 不能（要等 CSS） | `link rel="preload" as="image"` |
+| 同步脚本 | High，且阻塞解析 | 能 | 能不加就不加 |
+| 带 `defer` 的脚本 | Low | 能 | 默认选择，保持解析不中断 |
+| 带 `async` 的脚本 | Low | 能 | 独立的第三方统计、SDK |
+| `type="module"` 脚本 | Low，默认 defer | 能 | 现代代码的默认形态 |
+| 屏外图片 | Low | 能（只是不下载） | `loading="lazy"` + `fetchpriority="low"` |
+| 字体文件 | High（发现后） | 不能（要等 CSS） | 关键字体 `preload`，配 `font-display` |
+
+**对比**——脚本三兄弟（optimize-script-priority）：
+
+| 维度 | 同步 `<script>` | `defer` | `async` |
+| --- | --- | --- | --- |
+| 解析 HTML | 立即暂停 | 不打断 | 不打断 |
+| 执行时机 | 原地立刻 | DOM 解析完后按顺序 | 下载完就执行，顺序不定 |
+| 互相依赖 | 天然有序 | 保序 | 可能乱序 |
+| 适合 | 首帧前必须执行的极短代码 | 绝大多数业务代码 | 独立第三方脚本 |
+| 首屏风险 | 高 | 低 | 中（仍会抢主线程） |
+
+**动手试试**：这个模拟器不联网，只按真实浏览器的调度规则排出「请求开始时间」。切换开关，看主图从队尾挪到队首。
+
+```jsx playground
+import { useState } from 'react';
+
+const BEFORE = [
+  { name: 'HTML', start: 0, end: 120, hot: false },
+  { name: 'CSS', start: 120, end: 260, hot: false },
+  { name: '首屏主图（默认 low）', start: 300, end: 980, hot: true },
+  { name: '轮播第 2 张（eager）', start: 200, end: 560, hot: false },
+  { name: '统计脚本', start: 140, end: 420, hot: false },
+];
+const AFTER = [
+  { name: 'HTML', start: 0, end: 120, hot: false },
+  { name: '首屏主图（high）', start: 120, end: 430, hot: true },
+  { name: 'CSS', start: 120, end: 260, hot: false },
+  { name: '轮播第 2 张（lazy+low）', start: 430, end: 700, hot: false },
+  { name: '统计脚本', start: 140, end: 420, hot: false },
+];
+
+export default function App() {
+  const [fixed, setFixed] = useState(false);
+  const rows = fixed ? AFTER : BEFORE;
+  return (
+    <div className="pg-lcp">
+      <button onClick={() => setFixed(!fixed)}>
+        {fixed ? '已修复：主图第一优先 → 点击还原' : '修好前：主图排在队尾 → 点击修复'}
+      </button>
+      <p className="pg-lcp-tip">LCP 时刻：<b>{fixed ? '0.43s' : '0.98s'}</b>（主图下载完成）</p>
+      {rows.map((r) => (
+        <div className="pg-lcp-row" key={r.name}>
+          <span>{r.name}</span>
+          <div className="pg-lcp-track">
+            <div className={r.hot ? 'pg-lcp-bar pg-lcp-hot' : 'pg-lcp-bar'}
+                 style={{ left: `${r.start / 10}%`, width: `${(r.end - r.start) / 10}%` }} />
+          </div>
+        </div>
+      ))}
+      <style>{`
+        .pg-lcp { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 8px; }
+        .pg-lcp button { justify-self: start; padding: 6px 12px; border: 1px solid #cfd6e4; background: #fff; cursor: pointer; }
+        .pg-lcp-tip { margin: 0; color: #4a5262; }
+        .pg-lcp-row { display: grid; grid-template-columns: 150px 1fr; gap: 10px; align-items: center; }
+        .pg-lcp-track { position: relative; height: 18px; background: #f1f3f8; border-radius: 6px; overflow: hidden; }
+        .pg-lcp-bar { position: absolute; top: 0; bottom: 0; background: #9fb3d9; border-radius: 5px; transition: left .4s, width .4s; }
+        .pg-lcp-hot { background: #e8663c; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+**一个反例**：把 LCP 元素改成 JS 拿到数据后 `createElement('img')` 再插入，请求链就变成「HTML → JS 下载 → 执行 → 图片」，多出两次往返。再给力的 `fetchpriority` 也救不回来，因为图片根本没被预加载扫描器看见。
+
+### 1.3 图片与视频：能少下就少下（lazy-load-video-and-audio）
+
+**没它会怎样**：商品详情页下面堆了 6 个屏外视频，每个封面 300KB。即使写了 `preload="none"`，封面（poster）照样在首屏被下载，一共 1.8MB，把主图从 2.1s 挤到 3.6s。用户看到的就是「第一屏好慢」。
+
+这段在演示什么：三件事——屏外媒体延后、不同屏幕给不同尺寸的图、装饰图交给 CSS 按设备挑格式。
+
+```html
+<!-- 屏外播放器：连封面都等到接近视口再取 -->
+<video loading="lazy" controls width="640" height="360" poster="/media/poster.avif" preload="none">
+  <source src="/media/demo.webm" type="video/webm">
+</video>
+
+<!-- 响应式图片：浏览器按视口宽度和 DPR 自己挑一档 -->
+<img src="/img/card-640.avif" srcset="/img/card-640.avif 640w, /img/card-1280.avif 1280w"
+     sizes="(min-width: 900px) 33vw, 100vw" width="640" height="420" loading="lazy" decoding="async" alt="商品图">
+```
+
+装饰性背景不写进 HTML，交给 CSS 按格式与倍率各取所需（deliver-optimized-decorative-images）：
+
+```css
+.badge::before {
+  content: ""; inline-size: 48px; block-size: 48px;
+  background-image: image-set(url("/icons/badge.avif") type("image/avif") 1x,
+                              url("/icons/badge@2x.avif") type("image/avif") 2x);
+}
+```
+
+**浏览器做了什么**：带 `lazy` 的媒体元素在离视口还有一段距离前不建立请求，poster、`preload` 提示、自动播放一起推迟。`srcset` + `sizes` 让浏览器在**布局之前**就根据视口宽度算出该下哪一档，而不是先下大图再缩。`image-set()` 则按 `devicePixelRatio` 和支持的格式挑最小可用的那份（resolution-optimized-pseudo-elements），不用在 JS 里判断 UA。
+
+**对比**：
+
+| 维度 | 老做法 | 现代做法 |
+| --- | --- | --- |
+| 屏外视频 | 只写 `preload="none"`，封面照下 | `loading="lazy"`，poster 也延后 |
+| 响应式配图 | 一份 2x 大图发给所有屏幕 | `srcset` + `sizes`，按视口和 DPR 挑 |
+| 装饰图标 | HTML 里塞空 `div` + 固定 2x PNG | 伪元素 + `image-set()` 多格式多倍率 |
+| 屏外长图列表 | 全部 eager | `loading="lazy"` + `decoding="async"` |
+| LCP 图放 CSS 背景 | 只写 CSS，扫描器发现不了 | 额外 `<link rel="preload">` 并配 `media` |
+
+媒体元素的 `loading` 目前主要由 Chromium 支持，其他浏览器会忽略属性、行为退回老样子。要兜底就用 `IntersectionObserver`，进入视口后再赋 `src`。
+
+**动手试试**：24 张图，切成「全部直接请求」和「滚到附近才请求」，看计数器什么时候变大。这正是「首屏带宽被屏外图片吃掉」的直观版本。
+
+```jsx playground
+import { useRef, useState } from 'react';
+
+const TOTAL = 24;
+const ROW_H = 56;
+const VIEW_H = 240;
+
+export default function App() {
+  const [lazy, setLazy] = useState(true);
+  const [top, setTop] = useState(0);
+  const boxRef = useRef(null);
+  const loaded = lazy ? Math.min(TOTAL, Math.ceil((top + VIEW_H + 80) / ROW_H)) : TOTAL;
+
+  const toggle = () => {
+    setLazy(!lazy);
+    setTop(0);
+    if (boxRef.current) boxRef.current.scrollTop = 0;
+  };
+
+  return (
+    <div className="pg-img">
+      <button onClick={toggle}>当前：{lazy ? '懒加载（滚到附近才请求）' : '全部立即请求'} → 点击切换</button>
+      <p>已发出图片请求：<b>{loaded}</b> / {TOTAL}</p>
+      <div className="pg-img-box" ref={boxRef} onScroll={(e) => setTop(e.currentTarget.scrollTop)}>
+        {Array.from({ length: TOTAL }, (_, i) => (
+          <div className="pg-img-row" key={i}>
+            <span className={i < loaded ? 'pg-img-thumb pg-img-on' : 'pg-img-thumb'}>{i < loaded ? '已加载' : '占位'}</span>
+            <span>第 {i + 1} 张商品图</span>
+          </div>
+        ))}
+      </div>
+      <style>{`
+        .pg-img { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 8px; }
+        .pg-img button { justify-self: start; padding: 6px 12px; border: 1px solid #cfd6e4; background: #fff; cursor: pointer; }
+        .pg-img p { margin: 0; }
+        .pg-img-box { height: 240px; overflow: auto; border: 1px solid #e3e7ee; border-radius: 10px; }
+        .pg-img-row { height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 12px; border-bottom: 1px solid #eef1f6; }
+        .pg-img-thumb { display: grid; place-items: center; width: 88px; height: 36px; border-radius: 6px; background: #eef1f6; color: #8b93a3; font-size: 12px; }
+        .pg-img-on { background: #dcefe4; color: #1e8e5a; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+## 🟡 进阶：真实页面上的组合拳
+
+真实页面里三种问题会同时出现。下面按「症状 → 定位 → 修复 → 验证」走四个案子，每个案子都从监控里的一个具体数字开始。
+
+### 2.1 点一下筛选，620ms 没反应（break-up-long-tasks）
+
+**症状**：列表页的「只看有货」按钮，点下去先是毫无变化，620ms 后整张列表才一起变灰。RUM 里 INP p75 = 410ms。
+
+**定位**：先不看代码，用 Performance 面板录制「点击 → 停止」，在 Interactions 泳道能看到一次 620ms 的交互。展开旁边的 Long animation frames（identify-heavy-scripts），里面列出 `filterInventory` 占了 480ms，其中 90ms 是强制布局（forced layout）。结论很清楚：不是渲染慢，是主线程被一段同步计算占住了。
+
+INP 是三个数字相加，拆开看才知道该修哪里：**输入延迟**（点下去时主线程在忙别的事）+ **处理耗时**（你的回调本身慢）+ **呈现延迟**（下一帧的样式和布局慢）。用 `web-vitals/attribution` 的 `onINP` 把三段和最长脚本一起上报（identify-inp-causes），你才知道该动排队、动回调还是动样式。
+
+**修复**：把一个大循环切成 50ms 一片，每片之间把主线程还回去。50ms 是「长任务」的边界，超过它浏览器就有掉帧风险。
+
+```js
+// 让出主线程：支持的浏览器排到队首，旧浏览器退回宏任务
+const yieldToMain = () =>
+  'scheduler' in globalThis && scheduler.yield
+    ? scheduler.yield()
+    : new Promise((resolve) => setTimeout(resolve, 0));
+
+async function filterInventory(rows, keyword) {
+  const result = [];
+  let deadline = performance.now() + 50;
+  for (const row of rows) {
+    if (row.name.includes(keyword)) result.push(row);
+    if (performance.now() >= deadline) {
+      await yieldToMain();                 // 这里让用户输入插队
+      deadline = performance.now() + 50;
+    }
+  }
+  return result;
+}
+```
+
+不同性质的工作也别挤在一条队列里（schedule-tasks-by-priority）：先画界面，再跑统计，后台任务可以被取消。
+
+```js
+scheduler.postTask(() => renderRows(rows), { priority: 'user-visible' });
+scheduler.postTask(() => sendStats(rows.length), { priority: 'background' });
+```
+
+**修复前后对比**：
+
+| 观测项 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 单次交互耗时 | 620ms | 180ms |
+| 最长单个任务 | 480ms | 46ms |
+| INP p75 | 410ms | 165ms |
+| 按钮按下到出现按下态 | 约 600ms | 16ms（同一帧） |
+
+**验证**：改完再录一次 Performance，Long animation frames 里最长脚本应该低于 50ms；RUM 看 p75 一周，而不是看自己这一台机器。
+
+**动手试试**：同一份计算，一口气跑完 vs 切成 24 片让出主线程。右边「点我 +1」能不能立刻加一，就是 INP 的体感。
+
+```jsx playground
+import { useEffect, useRef, useState } from 'react';
+
+const CHUNKS = 24;
+const WORK = 6e6;
+const spin = (n) => {
+  let s = 0;
+  for (let i = 0; i < n; i++) s += i % 7;
+  return s;
+};
+
+export default function App() {
+  const [split, setSplit] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [clicks, setClicks] = useState(0);
+  const [gap, setGap] = useState(0);
+  const worst = useRef(0);
+  const last = useRef(0);
+
+  useEffect(() => {
+    let id;
+    const loop = (t) => {
+      if (last.current) worst.current = Math.max(worst.current, t - last.current);
+      last.current = t;
+      setGap(Math.round(worst.current));
+      id = requestAnimationFrame(loop);
+    };
+    id = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(id);
+  }, []);
+
+  const run = async () => {
+    worst.current = 0;
+    setBusy(true);
+    if (split) {
+      for (let i = 0; i < CHUNKS; i++) {
+        spin(WORK);
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    } else spin(CHUNKS * WORK);
+    setBusy(false);
+  };
+
+  return (
+    <div className="pg-it">
+      <button onClick={() => setSplit(!split)}>当前：{split ? '切片执行（每片让出主线程）' : '一口气执行'} → 点击切换</button>
+      <div className="pg-it-row">
+        <button onClick={run} disabled={busy}>{busy ? '任务进行中…' : '先跑任务'}</button>
+        <button onClick={() => setClicks(clicks + 1)}>点我 +1（{clicks}）</button>
+      </div>
+      <p className={gap > 200 ? 'pg-it-bad' : 'pg-it-good'}>最长帧间隔：{gap}ms</p>
+      <style>{`
+        .pg-it { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 10px; }
+        .pg-it button { padding: 6px 12px; border: 1px solid #cfd6e4; background: #fff; cursor: pointer; }
+        .pg-it button:disabled { opacity: .6; cursor: progress; }
+        .pg-it-row { display: flex; gap: 10px; }
+        .pg-it p { margin: 0; font-weight: 600; }
+        .pg-it-bad { color: #c0392b; }
+        .pg-it-good { color: #1e8e5a; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+**一个容易误判的现象**：INP 400ms，但 LoAF 里最长脚本只有 40ms。这说明脚本本身不慢，问题在**输入延迟**——用户点下去时，主线程正排队跑别人的任务。这时先降整体占用，别盯着这个 handler 改。
+
+### 2.2 长列表滚动发涩（defer-rendering-heavy-content）
+
+**症状**：商品列表 800 张卡片，每张带缩略图和三个标签。滚动掉帧，手指离开后画面还在「追」；从列表点进详情，先白屏 1.4s。
+
+**定位**：录一段滚动，Frames 泳道出现大片长帧，主线程上十几个 60~120ms 的任务；Rendering 面板开 Paint flashing，轻轻一滚整屏闪绿，说明每次滚动都在重绘所有卡片。
+
+**修复**：屏外卡片跳过布局与绘制；滚动中的重活挪到滚动真正结束时；下一跳页面提前准备。
+
+```css
+/* 只给首屏之外、结构复杂的卡片；contain-intrinsic-size 必填，
+   否则屏外高度塌成 0，滚动条忽长忽短，FPS 上去了 CLS 崩了 */
+.product-card { content-visibility: auto; contain-intrinsic-size: auto 220px; }
+```
+
+**浏览器做了什么**：`content-visibility: auto` 让浏览器跳过屏外元素的布局与绘制，只保留一个占位高度；元素接近视口时才真正计算样式、布局、绘制。跳过的部分**暂时不在无障碍树里**，这既是收益也是代价（见 3.2）。
+
+滚动期间只做轻量反馈，真正要读数据、算位置、发埋点，等停稳（defer-work-until-scroll-ends）：
+
+```js
+const scroller = document.querySelector('.product-list');
+
+// 滚动中：只改一个 CSS 变量，不碰 DOM 结构
+scroller.addEventListener('scroll', () => {
+  rail.style.setProperty('--progress', String(scroller.scrollTop / scroller.scrollHeight));
+});
+
+// 真正停稳后：取数、计算、上报
+scroller.addEventListener('scrollend', () => {
+  const visible = mostVisibleCard(scroller);
+  loadMore(visible.dataset.section);
+  track('scroll_end', { section: visible.dataset.section });
+});
+```
+
+复杂看板里还有一条铁律（interactions-in-complex-layouts）：事件里**先批量读、再批量写**。读 `offsetHeight` 会强制同步布局，如果读一下、写一下交替进行，浏览器会把布局重算十几遍。
+
+```js
+// ❌ 读写交替：每次循环都强制一次布局
+cards.forEach((card) => {
+  card.style.height = card.offsetHeight + 8 + 'px';
+});
+
+// ✅ 先读完、再统一写
+const heights = cards.map((card) => card.offsetHeight);
+cards.forEach((card, i) => { card.style.height = heights[i] + 8 + 'px'; });
+```
+
+**修复前后对比**：
+
+| 观测项 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 滚动帧率 | 20 fps | 58 fps |
+| 滚动期间长任务 | 约 12 个/秒 | 1 个/秒 |
+| 列表 → 详情首屏 | 1.4s（点击后才请求） | 0.35s（悬停时已预渲染） |
+| 卡片重绘范围 | 整屏 | 仅变化的那张卡 |
+
+**验证**：在 Performance 面板录一段滚动，对比勾选 `content-visibility` 前后的主线程任务数与帧率；再故意删掉 `contain-intrinsic-size` 滚一次，就能亲眼看到滚动条长度跳变——那是用 CLS 换 FPS。
+
+**还剩一个坑**：屏外内容只是不画，里面的轮询、动画、WebSocket 心跳一个没停（efficient-background-processing）。要用状态事件把它们真正停掉。
+
+```js
+const section = document.querySelector('.live-board');
+section.addEventListener('contentvisibilityautostatechange', (event) => {
+  if (event.skipped) stopPolling();          // 屏外：停轮询、停动画
+  else { startPolling(); refreshOnce(); }    // 回视口：先补一次最新数据
+});
+```
+
+### 2.3 下一跳白屏：把导航提前做掉（improve-next-page-load-performance）
+
+**症状**：用户从列表点进详情，总要等一次完整的「HTML → CSS → JS → 数据 → 首屏」，1.2~1.8s。用户感受是「这个站点点哪都慢」，但每个页面单看指标都还行。
+
+这段在演示什么：用声明式规则告诉浏览器「用户很可能去这类页面」，浏览器在你点击之前就把页面预渲染好。
+
+```html
+<script type="speculationrules">
+  {
+    "prerender": [{
+      "where": {
+        "and": [
+          { "href_matches": "/product/*" },
+          { "not": { "selector_matches": ".no-prerender" } }
+        ]
+      },
+      "eagerness": "moderate"
+    }]
+  }
+</script>
+```
+
+**三种提前量，别混用**：
+
+| 手段 | 做了什么 | 省下的时间 | 什么时候用 |
+| --- | --- | --- | --- |
+| `preload` | 只下载资源，不执行 | 一个资源往返 | 当前页马上要用的关键资源 |
+| `prefetch` | 下载资源，优先级最低 | 带宽上的提前量 | 旧浏览器兜底，或预取单个文件 |
+| `prerender` | 完整渲染页面（含 JS） | 几乎整段导航 | 下一跳明确、命中率高 |
+| `eagerness: immediate` | 一出现规则就做 | 最多 | 只给「必点」的单个目标 |
+| `eagerness: moderate` | 悬停/按下才开始 | 较多 | 列表页的默认选择 |
+
+**必须排除有副作用的地址**：`/logout`、`/cart/add`、带支付参数的 URL。用 `where` 规则而不是 URL 清单，新增页面才不会漏。预渲染的页面在后台也可能执行 JS，所以它里面的埋点要能识别「这是预渲染」，否则统计会翻倍。
+
+### 2.4 别让非关键脚本和后台请求抢带宽
+
+**症状**：首屏已经很干净了，但 LCP 还是慢 300ms。Network 里发现一笔埋点请求和主图同时出发，带宽被对半劈开。
+
+这段在演示什么：把后台请求降权（deprioritize-background-fetches），并让 polyfill 只在真正缺能力的环境下载（conditional-async-dependencies）。
+
+```js
+// 埋点、日志、后台同步：明确告诉浏览器别和用户请求抢
+fetch('/beacon', { method: 'POST', body, keepalive: true, priority: 'low' });
+const img = new Image(); // 图片请求也可以降权
+img.fetchPriority = 'low'; img.src = '/pixel.gif';
+```
+
+这段在演示什么：让 polyfill 变成条件依赖，并且串行导入，避免它和业务代码并行抢执行。
+
+```js
+// polyfill-entry.js：只有缺能力的环境才真正下载 polyfill
+if (!('popover' in HTMLElement.prototype)) {
+  await import('./popover-polyfill.js');
+}
+export const polyfillsReady = true;
+
+// main.js：串行导入，别让兄弟模块插队
+await import('./polyfill-entry.js');
+await import('./app.js');
+```
+
+坑在这里：顶层 `await` 只挂起**导入它的那个模块**，写成两条并列的静态 `import` 时，`app.js` 会在 polyfill 落地前就开始执行。
+
+A/B 实验脚本是另一类高频事故（flicker-free-client-side-ab-testing）：同步加载阻塞首屏；改成 `async` 又会让页面先画默认样式再跳变，用户看到「闪一下」。正确姿势是让它下载不阻塞，但在首帧前应用变体。
+
+```html
+<!-- async 下载、blocking="render" 保证首帧前生效，不出现闪变 -->
+<script async blocking="render" src="/experiments.js"></script>
+```
+
+## 🔴 高阶：测量、边界与降级
+
+### 3.1 自己算：会话时长、前台时间、初始可见性
+
+第三方 RUM 只给你一个数，真正要解释数字时还得自己算。三类最常见的错误：
+
+**第一类：把「加载到卸载」当阅读时长**（calculate-total-foreground-time）。用户切到别的标签页、锁屏、被电话打断，这段时间不该算。要从可见性切换记录里累加：
+
+```js
+const foregroundMs = performance.getEntriesByType('visibility-state')
+  .reduce((sum, entry, i, all) => {
+    if (entry.name !== 'visible') return sum;
+    return sum + ((all[i + 1]?.startTime ?? performance.now()) - entry.startTime);
+  }, 0);
+```
+
+**第二类：后台标签页污染分位数**（detect-initial-visibility-state）。页面可能是在后台标签页里被打开的：统计脚本执行时 `document.visibilityState` 早已变成 `visible`，但这批样本的 LCP/渲染时间本来就不该和前台访问混在一起。
+
+```js
+// 第一条 visibility-state 条目 = 文档加载时的真实状态
+const [initial] = performance.getEntriesByType('visibility-state');
+if (initial?.name === 'hidden') rum.setTag('initial_visibility', 'hidden'); // 单独分组
+```
+
+**第三类：LCP 之后的卡顿没人管**（interaction-paint-timing）。LCP 在首次交互后就不再产生新候选，「用户点开菜单后卡住」永远不会体现在 LCP 里。要用 Event Timing 把交互和它之后的绘制关联起来：
+
+```js
+new PerformanceObserver((list) => {
+  for (const e of list.getEntries()) {
+    if (e.duration <= 200) continue;
+    navigator.sendBeacon('/rum/interaction', JSON.stringify({
+      type: e.name, duration: Math.round(e.duration),
+      interactionId: e.interactionId,          // 串起同一交互的多个事件
+      target: e.target?.tagName,
+    }));
+  }
+}).observe({ type: 'event', buffered: true, durationThreshold: 104 });
+```
+
+会话级指标同理，不能只报到 `load` 就结束（full-session-analytics）：整段会话的指标要在离页时仍能送达，这也是下面 `keepalive` 存在的意义。
+
+### 3.2 埋点批量上报：别让统计把自己拖慢（batch-analytics-events）
+
+**症状**：性能修好后反而更慢。细看发现每个事件一次 `fetch`，一次滚动打出几十个请求，主线程被切碎、带宽被占满。
+
+这段在演示什么：攒窗口批量发送，页面隐藏时兜底，并用 `keepalive` 保证离页请求不被取消。
+
+```js
+const queue = [];
+let timer;
+const flush = () => {
+  if (!queue.length) return;
+  fetch('/analytics', { method: 'POST', body: JSON.stringify(queue.splice(0)), keepalive: true });
+};
+export function track(event) {
+  queue.push(event);
+  clearTimeout(timer);
+  timer = setTimeout(flush, 10_000);                   // 攒 10 秒
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flush();  // 最可靠的结束信号
+});
+```
+
+**对比**：
+
+| 维度 | 每个事件一次请求 | 批量 + 兜底 |
+| --- | --- | --- |
+| 一次滚动的请求数 | 30~60 | 1 |
+| 主线程占用 | 每次序列化、每次建连 | 一次序列化 |
+| 离页丢失 | 常见（请求被取消） | `keepalive` / `fetchLater` 兜住 |
+| 后端压力 | 高，峰值集中 | 平滑 |
+
+Chromium 上可以用 `fetchLater()`：请求排队到窗口结束或用户离页时由浏览器发出，窗口内再来事件就中止上一个、带整队重发。它必须包在 `try/catch` 里处理配额错误，每个 origin 约 64KB。
+
+### 3.3 不支持怎么办：先有退路，再谈收益
+
+性能特性几乎都是「静默忽略」：不支持时页面照常可用，只是没收益。真正危险的是**拿它做业务判断**。
+
+| 特性 | 最低可用版本 | 不支持时的退路 |
+| --- | --- | --- |
+| `fetchpriority` | Chrome 102 / Safari 17.2 | 被忽略，退回启发式；关键图补 `preload` |
+| `content-visibility` | Chrome 85 / Safari 18 | 属性无效，内容正常显示；可补 `contain: layout style paint` |
+| `scrollend` | Chrome 114 / Safari 26.4 | 用防抖的 `scroll` 合成同名事件 |
+| Speculation Rules | Chrome 109 / Edge 109 | 给最可能的一页补 `link rel="prefetch"` |
+| `scheduler.yield()` | Chrome 129 | `await new Promise(r => setTimeout(r, 0))` |
+| `fetchLater()` | Chrome 135 | `visibilitychange` 变 hidden 时用 `keepalive` 发送 |
+| LoAF（长动画帧） | Chrome 123 | Long Tasks API + 面板人工归因 |
+| `visibility-state` 条目 | Chrome 115 | 最早的内联脚本里同步读一次 `document.visibilityState` |
+
+**每个收益都有代价**：
+
+| 手段 | 拿到的收益 | 付出的代价 |
+| --- | --- | --- |
+| 预渲染 | 导航近乎瞬时 | 每页一份内存与 CPU；非 eager 规则有数量上限 |
+| `content-visibility` | 屏外不布局不绘制 | 屏外内容暂不在无障碍树，Tab 到屏外可能丢焦点样式 |
+| `loading="lazy"` | 省首屏带宽 | 快速滚动时图片「追不上」，占位尺寸必须对 |
+| `fetchLater()` | 离页也能送达 | 每 origin 约 64KB 配额，超了要自己降级 |
+| `prefetch` | 下一页更快 | 用户没去就是纯浪费，弱网下反抢当前页带宽 |
+
+## 📋 决策速查
+
+| 症状 | 先查什么 | 用什么修 | Baseline |
+| --- | --- | --- | --- |
+| 首屏主图很晚才出现 | Network 里主图请求何时发出 | 放回原始 HTML + `fetchpriority="high"` | Widely |
+| LCP 是 CSS 背景图 | 预加载扫描器是否能看到 | `link rel="preload" as="image"` | Widely |
+| 屏外图片吃首屏带宽 | 首屏请求数与总字节 | `loading="lazy"` + `srcset` | Widely |
+| 点击后几百毫秒没反应 | Interactions 泳道 + LoAF | 50ms 切片 + `scheduler.yield()` | Limited |
+| 长列表滚动掉帧 | Paint flashing 与长帧 | `content-visibility: auto` | Newly |
+| 滚动中反复取数 | scroll 事件里的逻辑 | `scrollend` 后再做重活 | Newly |
+| 下一跳总是白屏 | 是否有点击前的预取 | Speculation Rules `prerender` | Limited |
+| 统计脚本拖慢首屏 | 脚本是否阻塞/抢带宽 | `async` / `defer` + `fetchpriority="low"` | Widely |
+| 埋点请求太碎 | 一次交互的请求数 | 批量窗口 + `visibilitychange` 兜底 | Widely |
+| 分位数总对不上 | 是否混入后台打开样本 | `visibility-state` 首条分组 | Limited |
+
+## ⚠️ 五个常见坑
+
+1. **给三张图都标 `fetchpriority="high"`**：优先级是零和的，全高等于全默认，还会把真正的主图挤后。只标一张。
+2. **给首屏主图加 `loading="lazy"`**：浏览器要等它接近视口才请求，LCP 反而更晚。lazy 只给屏外资源。
+3. **`content-visibility` 不配 `contain-intrinsic-size`**：屏外高度塌成 0，滚动条忽长忽短，FPS 上去了 CLS 崩了。
+4. **用 `setTimeout` 防抖冒充「滚动结束」**：定时器到点时手指往往还在滑，取数一次接一次，越防越抖。
+5. **每个埋点事件单独 `fetch`**：一次滚动几十个请求，既切碎主线程又抢带宽。攒窗口 + `visibilitychange` 兜底。
+
+## ✅ 自测三问
+
+1. LCP 3.6s，但主图请求在 1.1s 才发出，先改什么？（先让它被扫描器发现：放回原始 HTML 并提权，再谈压缩）
+2. INP 400ms，LoAF 里最长脚本只有 40ms，问题在哪？（输入延迟：交互发生时主线程正被别的任务占着）
+3. 加了 `content-visibility` 滚动顺畅了，但页面高度会跳，漏了什么？（`contain-intrinsic-size`；屏外内容的占位高度）
+
+## 关键要点
+
+- **先定位再动手**：LCP 慢修加载、INP 慢修主线程、CLS 大修尺寸，一次只改一类，用 p75 验证。
+- **优先级是零和的**：提权一张图就等于给其他资源降权；`fetchpriority="high"` 给多张等于没给。
+- **可发现性优先于体积**：LCP 元素必须在原始 HTML 里，别让它经过 JS 才出现。
+- **长任务按 50ms 切片**：`scheduler.yield()` 续体排到队首，`setTimeout` 排到队尾；跨优先级交给 `postTask`。
+- **渲染按位置省，度量按分组看**：屏外 `content-visibility` + `scrollend`；后台打开的样本单独分组，否则分位数永远对不上。
+
+## 延伸阅读
+
+- [Core Web Vitals（web.dev）](https://web.dev/articles/vitals) ｜ [Optimize LCP](https://web.dev/articles/optimize-lcp)
+- [Speculation Rules API（MDN）](https://developer.mozilla.org/docs/Web/API/Speculation_Rules_API) ｜ [fetchLater（MDN）](https://developer.mozilla.org/docs/Web/API/Window/fetchLater)
+- [scheduler.yield（MDN）](https://developer.mozilla.org/docs/Web/API/Scheduler/yield) ｜ [Prioritized Task Scheduling API](https://developer.mozilla.org/docs/Web/API/Prioritized_Task_Scheduling_API)
+- [content-visibility（MDN）](https://developer.mozilla.org/docs/Web/CSS/content-visibility) ｜ [scrollend 事件（MDN）](https://developer.mozilla.org/docs/Web/API/Element/scrollend_event)
+- [web-vitals 库](https://github.com/GoogleChrome/web-vitals) ｜ [Long Animation Frames API](https://developer.mozilla.org/docs/Web/API/PerformanceLongAnimationFrameTiming)
+
+---
+
+← 上一章：[06 无障碍与色彩](/web/06-accessibility) ｜ 下一章：[08 安全与隐私](/web/08-security-privacy)

@@ -1,0 +1,602 @@
+---
+title: 06 · 无障碍与色彩
+description: 从「只用键盘能不能走完全站」出发，把语义、焦点、惰化、播报、明暗主题与对比度串成一条可自测的线。
+---
+
+# 第 6 章 无障碍与色彩
+
+> **难度**：🟡 进阶 ｜ **前置**：[01 HTML 交互](/web/01-html-interactive)、[05 组件与 UX 模式](/web/05-components-ux) ｜ **学完你能**：拔掉鼠标走完全站，并让明暗两套配色都守住 4.5:1。
+
+**这一章要解决的毛病**
+
+- 按 Tab 走一圈，焦点环在某些按钮上凭空消失，用户不知道现在走到哪。
+- 弹窗打开后 Tab 还能跑到背后的页面里，关掉后焦点直接回到页面顶部。
+- 表单刚输入一半就整片标红，读屏用户却在页面加载时就听到「无效输入」。
+- 暗色模式下输入框白得刺眼；浅灰的说明文字在白底上根本看不清。
+
+这一章的可自测标准只有一句：**拔掉鼠标，只用键盘能不能走完全站**。做不到，先别谈配色。下面按「语义 → 焦点 → 惰化 → 播报 → 色彩 → 动效」推进，每一节都给一个能亲手验证的动作。
+
+## 🟢 入门：先让它跑起来
+
+### 1.1 语义先于样式：`button` 不是 `div`（accessibility）
+
+**没它会怎样**：视觉上两个「保存」长得一模一样，可 `div` 那个按 Tab 停不下来、按 Enter 和空格没反应。读屏用户听到的只是一句「保存」，既没有「按钮」这个角色，也没有任何「可操作」的暗示——他根本不知道该不该按。
+
+这段代码并排放了两种写法，差别全在标签本身：
+
+```html
+<!-- ❌ 只是个能点击的盒子 -->
+<div class="btn" data-action="save">保存</div>
+
+<!-- ✅ 浏览器眼里的按钮 -->
+<button type="button" data-action="save">保存</button>
+```
+
+**浏览器做了什么**：`button` 被映射成 `role="button"` 进入无障碍树，并自动进入 Tab 序列；Enter 与空格会合成一次 `click`；`:disabled` 同时改变语义、焦点与指针行为；放在 `form` 里还默认承担提交角色。`div` 这些一个都没有——你补 `role="button"`、补 `tabindex="0"`、补两个按键分支、补 `aria-disabled`，也还差「表单提交」和「Label in Name」两件事。
+
+**对比**：
+
+| 维度 | `div` + click | 原生 `button` |
+| --- | --- | --- |
+| 读屏播报 | 「保存」 | 「保存，按钮」 |
+| 键盘 | 要补 `tabindex` + Enter/Space 分支 | 自带 |
+| 禁用 | 补 `aria-disabled` 且仍可 Tab | `disabled` 一步到位 |
+| 焦点样式 | 需要自己兜底 | 浏览器默认给 |
+| 事件 | 只有 click | click / submit / 表单重置 |
+
+### 1.2 焦点必须看得见，但不必每点必现（accessibility）
+
+**没它会怎样**：设计师说「这个蓝框太丑」，于是全局 `outline: none`。键盘用户按 Tab 时页面毫无反应，只能盲猜焦点在哪；再叠一个自定义下拉菜单，就彻底迷路。
+
+**❌ 老写法**：把焦点环删掉，顺手把键盘用户的位置感也删了。
+
+```css
+button:focus { outline: none; }
+```
+
+**✅ 现代写法**：用 `:focus-visible` 只为「需要指示」的聚焦画环。
+
+```css
+:focus-visible {
+  outline: 3px solid var(--focus-ring, #2563eb);
+  outline-offset: 2px; /* 环与元素之间留缝，圆角按钮也不糊 */
+}
+.card:focus-within { box-shadow: 0 0 0 3px var(--focus-ring); }
+```
+
+**浏览器做了什么**：浏览器自己记录「最近一次交互是键盘还是指针」。`:focus` 一律匹配，`:focus-visible` 只在它判断「这次聚焦应该可见」时匹配——Tab、Shift+Tab、脚本主动聚焦通常算，鼠标点按钮通常不算；文本输入框因为随时会打字，鼠标点进去也算。所以同一套样式能同时满足「鼠标用户不想看到框」和「键盘用户必须看到框」。`:focus-within` 则用于卡片、表格行这类复合区域：子元素聚焦时点亮父容器。
+
+**对比**：
+
+| 做法 | 键盘用户 | 鼠标用户 | 强制色彩模式 |
+| --- | --- | --- | --- |
+| `outline: none` | 完全迷失 | 无感 | 无焦点指示 |
+| `:focus` + `box-shadow` | 能看见 | 每次点击都出现框 | 阴影被移除，等于没有 |
+| `:focus-visible` + `outline` | 能看见 | 无框 | 系统色保留 |
+
+一条硬线：焦点指示与相邻背景的对比不低于 3:1（WCAG 2.4.11）。别只用 `box-shadow` 画环，Windows 高对比模式会删阴影。
+
+下面这个 playground 把两种做法并排：左边删掉焦点环，右边用 `:focus-visible`。先用鼠标点一下按钮，再只按 Tab 走一遍，体会两种输入方式下的差别。
+
+```jsx playground
+export default function App() {
+  const cols = [
+    ['pg-focus-bad', '❌ outline: none', '按 Tab 到这里，看不出焦点在哪。'],
+    ['pg-focus-good', '✅ :focus-visible', '按 Tab 到这里，焦点环清晰可见。'],
+  ];
+  return (
+    <div className="pg-focus">
+      {cols.map(([cls, title, tip]) => (
+        <section key={cls} className={'pg-focus-col ' + cls}>
+          <h3>{title}</h3>
+          <p>{tip}</p>
+          <button>删除</button>
+          <button>取消</button>
+        </section>
+      ))}
+      <style>{`
+        .pg-focus { display: grid; gap: 16px; font: 14px/1.6 system-ui, sans-serif; }
+        .pg-focus-col { border: 1px solid #dfe3ea; border-radius: 12px; padding: 14px 16px; display: grid; gap: 8px; justify-items: start; }
+        .pg-focus-col h3 { margin: 0; font-size: 15px; }
+        .pg-focus-col p { margin: 0; color: #4a5262; }
+        .pg-focus-col button { padding: 6px 16px; border-radius: 8px; border: 1px solid #c8ccd4; background: #fff; cursor: pointer; font: inherit; }
+        .pg-focus-bad button:focus { outline: none; }
+        .pg-focus-good :focus-visible { outline: 3px solid #2563eb; outline-offset: 2px; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 1.3 惰化：`inert` 让背景真的「不存在」（accessibility）
+
+**没它会怎样**：侧栏浮层打开，视觉上盖住了主内容，但键盘用户按 Tab 会一个个穿过背后那 20 个链接和按钮，读屏器也照常念它们。这就是「幽灵焦点」——看得见的地方去不了，看不见的地方却能去。
+
+这段代码演示三件必须成组出现的动作：屏蔽背景、把焦点送进浮层、关闭时归还焦点：
+
+```html
+<div id="app">
+  <header><button id="open-panel">打开设置</button></header>
+  <main>主内容：十几个链接和表单</main>
+</div>
+<aside id="side-panel" hidden aria-label="设置面板">
+  <input placeholder="昵称" />
+  <button id="close-panel">关闭</button>
+</aside>
+```
+
+```js
+const app = document.getElementById('app');
+const panel = document.getElementById('side-panel');
+
+function openPanel() {
+  app.inert = true;             // 背景：不可点、不可聚焦、读屏跳过
+  panel.hidden = false;
+  panel.querySelector('input')?.focus();
+}
+function closePanel() {
+  app.inert = false;
+  panel.hidden = true;
+  document.getElementById('open-panel')?.focus(); // 手动归还焦点
+}
+document.getElementById('open-panel').addEventListener('click', openPanel);
+document.getElementById('close-panel').addEventListener('click', closePanel);
+```
+
+**浏览器做了什么**：`inert` 是一个布尔属性，对整棵子树生效：从无障碍树移除、从 Tab 序列移除、不接收指针事件，同时保留视觉。它比 `aria-hidden` 多了「不可交互」，比 `display: none` 多了「还看得见」。注意它不等于 `disabled`——外观不会变，所以背景通常还要叠一层半透明遮罩，告诉视力正常的用户「这里现在点不动」。
+
+**对比**：
+
+| 手段 | 视觉 | Tab 可达 | 读屏可及 | 指针事件 |
+| --- | --- | --- | --- | --- |
+| `aria-hidden="true"` | 在 | 在 | 不可及 | 在 |
+| `inert` | 在 | 不可达 | 不可及 | 不可用 |
+| `hidden` / `display: none` | 不在 | 不可达 | 不可及 | 不可用 |
+| `disabled` | 在（变灰） | 不可达 | 可及（念「不可用」） | 不可用 |
+
+## 🟡 进阶：组合起来解决真实场景
+
+### 2.1 场景一：错误要同时被看见和被听见（accessible-error-announcement）
+
+需求：用户离开一个填错的字段时，边框变红、出现错误文案，读屏器在半秒内播报；页面刚加载时什么都别说。
+
+方案：视觉交给 `:user-invalid`，程序态交给 `aria-invalid`，两者在同一时刻、由同一个监听器同步；播报走一条常驻的 `role="status"`，而不是每条错误各挂一个 live region。
+
+```html
+<label for="email">邮箱</label>
+<input id="email" name="email" type="email" required
+       aria-invalid="false" aria-describedby="email-error">
+<p id="email-error" class="error" hidden>请输入有效邮箱，例如 name@example.com</p>
+<p id="form-status" class="visually-hidden" role="status"></p>
+```
+
+```js
+const status = document.getElementById('form-status');
+
+document.addEventListener('blur', (event) => {
+  const el = event.target;
+  if (!el.matches?.('input, select, textarea')) return;
+  const invalid = el.matches(':user-invalid');
+  el.setAttribute('aria-invalid', String(invalid));       // 程序态与视觉态同一时刻
+  const tip = document.getElementById(el.getAttribute('aria-describedby'));
+  tip.hidden = !invalid;
+  if (invalid) setTimeout(() => { status.textContent = tip.textContent; }, 500);
+}, true); // blur 不冒泡，必须挂捕获阶段
+```
+
+**浏览器做了什么**：`:user-invalid` 只在「用户编辑过并离开」或「尝试提交」之后才会匹配，所以页面加载时不会因为空值整片标红；`:invalid` 则是「一加载就报错」的老毛病。`blur` 事件不冒泡，所以要挂捕获阶段才能做统一委托。错误段落用 `hidden` 切换显隐，同时靠 `aria-describedby` 挂在输入框上——读屏器聚焦该字段时会附带读出描述，不必依赖播报。
+
+**对比**：
+
+| 维度 | 老写法 | 现代写法 |
+| --- | --- | --- |
+| 判定时机 | 加载就 `:invalid`，整片标红 | `:user-invalid`，编辑后才提示 |
+| 播报 | 每条错误一个 `aria-live`，互相打断 | 一条常驻 `role="status"`，串行播报 |
+| 焦点 | 报错时抢焦点跳到第一个错误 | 不抢焦点，离开字段即提示 |
+| 视觉 | 仅靠红色边框 | 红边框 + 图标 + 文案（不只颜色） |
+
+播报强度只有三档，选错比不播报更吵：
+
+| 场景 | 用什么 | 说明 |
+| --- | --- | --- |
+| 保存成功、筛选结果数、表单校验 | `role="status"`（polite） | 等当前朗读结束再说 |
+| 付款失败、会话即将过期 | `role="alert"` / `aria-live="assertive"` | 立刻打断，慎用 |
+| 纯视觉的气泡提示 | `ariaNotify()`（Chromium 试用） | 不改 DOM 也能播报，需特性检测 |
+
+下面这个 playground 把「视觉错误 + 播报文本」并排展示：输入一个坏邮箱再离开，右侧就是读屏器实际会说的话。
+
+```jsx playground
+import { useState } from 'react';
+
+export default function App() {
+  const [value, setValue] = useState('');
+  const [touched, setTouched] = useState(false);
+  const bad = touched && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  return (
+    <div className="pg-err">
+      <label htmlFor="pg-email">邮箱</label>
+      <input
+        id="pg-email" type="email" value={value} placeholder="name@example.com"
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={() => setTouched(true)}
+        aria-invalid={bad}
+        aria-describedby={bad ? 'pg-email-error' : undefined}
+        className={bad ? 'is-bad' : ''}
+      />
+      {bad && <p id="pg-email-error" className="pg-err-msg">请输入有效邮箱，例如 name@example.com</p>}
+      <p className="pg-err-status" role="status">
+        {bad ? '播报：请输入有效邮箱，例如 name@example.com' : '暂无播报：还没编辑过就不报错'}
+      </p>
+      <style>{`
+        .pg-err { display: grid; gap: 6px; max-inline-size: 22rem; font: 14px/1.6 system-ui, sans-serif; }
+        .pg-err input { padding: 8px 12px; border: 1px solid #c8ccd4; border-radius: 8px; font: inherit; }
+        .pg-err input.is-bad { border-color: #c0392b; box-shadow: 0 0 0 1px #c0392b inset; }
+        .pg-err-msg { margin: 0; color: #c0392b; }
+        .pg-err-status { margin: 0; padding-block-start: 6px; border-block-start: 1px dashed #dfe3ea; color: #4a5262; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 2.2 场景二：模态打开后，背景就该「不存在」（accessibility）
+
+需求：确认删除的对话框打开时，Tab 不能跑到背后页面，Esc 关闭，关闭后焦点回到「删除」按钮。
+
+方案：模态用原生 `dialog` + `showModal()`；非模态浮层用 `inert` 罩住背景（上一节那套）。
+
+```html
+<button type="button" commandfor="confirm" command="show-modal">删除</button>
+<dialog id="confirm" aria-labelledby="confirm-title">
+  <h2 id="confirm-title">确认删除这条记录？</h2>
+  <p>删除后无法恢复。</p>
+  <form method="dialog">
+    <button value="cancel">取消</button>
+    <button value="ok">删除</button>
+  </form>
+</dialog>
+```
+
+```js
+const dialog = document.getElementById('confirm');
+// Esc：可拦截，做「有未保存内容就别关」之类的判断
+dialog.addEventListener('cancel', (event) => {
+  if (hasUnsavedChanges()) event.preventDefault();
+});
+// 关闭后统一收尾；焦点已由浏览器归还到触发按钮
+dialog.addEventListener('close', () => {
+  status.textContent = `已${dialog.returnValue === 'ok' ? '删除' : '取消'}`;
+});
+```
+
+**浏览器做了什么**：`showModal()` 把 dialog 放进顶层并合成遮罩，外部内容自动 `inert`，Tab 被限制在对话框内，Esc 触发 `cancel`，关闭后焦点回到打开前的元素——整套焦点陷阱由浏览器实现。`returnValue` 记录用户点了哪个带 `value` 的按钮，`close` 事件是收尾的唯一入口。
+
+**对比**：
+
+| 维度 | 手写焦点陷阱 | `showModal()` | `inert` 罩层 |
+| --- | --- | --- | --- |
+| 背景不可达 | 逐个子树加 `aria-hidden` + `tabindex="-1"` | 自动 | 一行 |
+| Tab 循环 | 监听 Tab、算首尾、手动 `.focus()` | 自动 | 需另配焦点环 |
+| 关闭还原 | 记录并手动还原 | 自动 | 手动 |
+| 滚动锁 | `overflow: hidden` 导致宽度跳动 | `:modal` + `overscroll-behavior` | 同左 |
+
+经典事故：只用 `aria-hidden` 罩住背景，却没处理焦点——读屏器看不见背景了，键盘却还能 Tab 进去。记住 `inert` 不是 `disabled`：它不改变外观，视觉遮罩得另加。
+
+### 2.3 场景三：方向键只属于复合控件（spatial-navigation）
+
+需求：媒体宫格里按方向键在卡片间移动，但要能按一次 Tab 跳过整个宫格；宫格外不劫持方向键，页面照常滚动。
+
+方案：容器 `role="grid"`，条目 `role="gridcell"` + roving tabindex（只有当前项是 0），方向键用实时坐标找邻居；找不到就不拦截，把按键还给浏览器。
+
+```html
+<div id="grid" role="grid" aria-label="媒体库" focusgroup="grid">
+  <button role="gridcell" tabindex="0">封面 1</button>
+  <button role="gridcell" tabindex="-1">封面 2</button>
+  <button role="gridcell" tabindex="-1">封面 3</button>
+</div>
+```
+
+```js
+grid.addEventListener('keydown', (event) => {
+  if (!event.target.matches('[role="gridcell"]')) return;
+  const next = findNeighbor(event.target, event.key); // 按中心点与主轴找最近项
+  if (!next) return;                                  // 到头了：不 preventDefault，交还滚动
+  event.preventDefault();
+  grid.querySelectorAll('[role="gridcell"]').forEach((cell) => { cell.tabIndex = -1; });
+  next.tabIndex = 0;
+  next.focus();
+});
+```
+
+**浏览器做了什么**：roving tabindex 让一组控件在 Tab 序列里只占一个停靠点——12 张卡片从「按 12 次 Tab」变成「按 1 次 Tab 进入，再用方向键走」。不拦截方向键是关键：用户按住 ↓ 时若宫格已到底，浏览器会正常滚动页面。
+
+**对比**：
+
+| 维度 | 老写法 | 现代写法 |
+| --- | --- | --- |
+| Tab 停靠 | 每项 `tabindex="0"`，宫格成 Tab 黑洞 | roving tabindex / `focusgroup` |
+| 方向键 | 全局监听，连表单里的箭头也被劫持 | 只在复合控件内、只处理有邻居的键 |
+| 焦点可见 | 与相邻项重叠，看不出走到哪 | 单停靠点 + 焦点环 |
+| 网格语义 | `div` 堆叠 | `role="grid"` + 行列语义 |
+
+哪些控件该用方向键，WAI-ARIA 作者实践给了默认算法：
+
+| 角色 | 组内方向键 | 典型组件 |
+| --- | --- | --- |
+| `tablist` | 左右（垂直时上下） | Tabs、分段控件 |
+| `menu` / `menubar` | 上下，顶层左右 | 操作菜单、应用菜单 |
+| `listbox` | 上下（含 Home/End） | 自定义下拉选择 |
+| `tree` / `treegrid` | 上下 + 左右展开收起 | 文件树、可展开表格 |
+| `grid` | 四向 + Home/End | 数据表、媒体宫格 |
+| `radiogroup` | 仅一个 Tab 停靠，箭头切换 | 单选组 |
+| `toolbar` | 左右 | 编辑器工具条 |
+
+### 2.4 场景四：字号要跟着系统走（respect-os-text-scale）
+
+**没它会怎样**：用户把系统字号调大，你的页面纹丝不动——iOS 的 Dynamic Type、Android 的字号缩放默认不作用到网页；或者你在 `:root` 写死了 `font-size: 16px`，把用户所有调整一次抹平。
+
+这段代码演示「接入系统字号 + 排版全部改用相对单位」：
+
+```html
+<meta name="text-scale" content="scale" />
+```
+
+```css
+:root { /* 故意留空：这里一旦写 font-size，缩放就失效 */ }
+h1 { font-size: clamp(2rem, 1.25rem + 2vw, 4rem); }
+p  { min-block-size: 1.5em; } /* 允许长高，不写固定 height */
+```
+
+**浏览器做了什么**：声明 `text-scale` 后，浏览器把根字号 `1rem` 缩放到系统偏好，所有 `rem`/`em` 的字号、间距、布局一起放大。纯 `vw` 字号不响应缩放，所以流式字号要写成 `clamp()` 混合形式：下限用 `rem` 保证可缩放，中间用 `vw` 做流体，上限防止标题过大。
+
+**对比**：
+
+| 维度 | 老写法 | 现代写法 |
+| --- | --- | --- |
+| 字号单位 | `px` 写死 | `rem` / `em` |
+| 流式标题 | `font-size: 4vw` | `clamp(2rem, 1.25rem + 2vw, 4rem)` |
+| 容器高度 | 固定 `height`，字大了溢出 | `min-block-size` |
+| 断点 | `px` | `em` 或容器查询 |
+
+关键坑：opt-in 之后**不得再覆盖根字号**，也别和 `env(preferred-text-scale)` 手动缩放叠加，否则会双重缩放。该能力仅 Chromium 146+ 支持；不支持的浏览器按标准字号渲染，用户仍可手动缩放，属于优雅降级。
+
+## 🔴 高阶：边界、性能与降级
+
+### 3.1 色彩：`light-dark()` 与 `color-scheme`
+
+**没它会怎样**：为了深色模式，你把整套颜色变量复制一份，用 `@media (prefers-color-scheme: dark)` 覆盖；可系统表单控件、滚动条、默认背景仍然白得刺眼，因为那些不归你的变量管。更糟的是用户手动切换主题时，媒体查询根本不理你。
+
+这段代码演示「一套声明，两套颜色」：
+
+```css
+:root {
+  color-scheme: light dark;   /* 告诉浏览器：两种模式都支持，跟系统走 */
+  --bg: light-dark(#ffffff, #12161f);
+  --fg: light-dark(#1b2130, #e8ecf5);
+  --line: light-dark(#dfe3ea, #2c3444);
+}
+body { background: var(--bg); color: var(--fg); }
+```
+
+**浏览器做了什么**：`color-scheme` 决定「使用中的配色方案」（used color scheme）——它不光影响你的 CSS，还决定 `<input>`、`<select>`、滚动条、默认画布用哪套系统色。`light-dark(a, b)` 是单个声明里的条件取值：按当前 used color scheme 选 a 或 b，不需要第二个选择器块。用户手动切换主题时，只需改 `color-scheme`，两个值一起翻：
+
+这段代码演示主题开关的全部逻辑——写回一个属性，而不是切一套样式表：
+
+```js
+// 主题开关 = 把用户选择写回 color-scheme
+document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+```
+
+**对比**：
+
+| 维度 | 老写法：两份变量 | 现代写法：`light-dark()` |
+| --- | --- | --- |
+| 代码量 | 每个变量写两遍 | 一行一个变量 |
+| 系统控件 | 仍是浅色，需要额外覆盖 | 跟着 `color-scheme` 一起变 |
+| 手动切换 | 媒体查询不响应 | 改一个属性即可 |
+| 兼容 | 全支持 | Baseline 2024-05 |
+
+下面 playground 里的按钮就是在改 `color-scheme`：注意输入框、按钮底色和文字会一起翻，而你没有写第二套样式表。
+
+```jsx playground
+import { useState } from 'react';
+
+export default function App() {
+  const [dark, setDark] = useState(false);
+  return (
+    <div className="pg-theme" data-theme={dark ? 'dark' : 'light'}>
+      <button className="pg-theme-btn" onClick={() => setDark(!dark)}>
+        切换到{dark ? '浅色' : '深色'}
+      </button>
+      <div className="pg-theme-card">
+        <h3>系统控件也一起变</h3>
+        <p>这段文字由 light-dark() 取色，没有第二套样式表。</p>
+        <input placeholder="输入框会跟着变" />
+      </div>
+      <style>{`
+        .pg-theme {
+          color-scheme: light dark;
+          --bg: light-dark(#fff, #12161f);
+          --fg: light-dark(#1b2130, #e8ecf5);
+          --line: light-dark(#dfe3ea, #2c3444);
+          --field: light-dark(#f6f7fa, #1b2130);
+          display: grid; gap: 12px; padding: 16px; font: 14px/1.6 system-ui, sans-serif;
+          border: 1px solid var(--line); border-radius: 12px;
+          background: var(--bg); color: var(--fg);
+        }
+        .pg-theme[data-theme="light"] { color-scheme: light; }
+        .pg-theme[data-theme="dark"] { color-scheme: dark; }
+        .pg-theme-card { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
+        .pg-theme-card h3 { margin: 0; font-size: 15px; }
+        .pg-theme-card p { margin: 0; }
+        .pg-theme-btn, .pg-theme-card input {
+          justify-self: start; padding: 6px 12px; border: 1px solid var(--line);
+          border-radius: 8px; background: var(--field); color: inherit; font: inherit;
+        }
+        .pg-theme-btn { cursor: pointer; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 3.2 对比度与强制色彩模式
+
+**没它会怎样**：浅灰说明文字 `#999` 放白底上，视力正常的用户在阳光下都费劲；开了 Windows 高对比模式后，你的品牌色边框、选中态、渐变进度条被系统整体替换或抹掉。
+
+对比度不是玄学，四步就能算：把 sRGB 通道线性化，按系数求相对亮度，再套比率公式。
+
+```js
+const lum = (hex) => {
+  const [r, g, b] = [1, 3, 5]
+    .map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+    .map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b; // 人眼对绿最敏感，对蓝最不敏感
+};
+const ratio = (a, b) => {
+  const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+};
+ratio('#999999', '#ffffff'); // ≈ 2.85，不合格
+ratio('#767676', '#ffffff'); // ≈ 4.54，刚好过正文的 4.5:1
+```
+
+记住两条线：正文 4.5:1；大字（18pt 或 14pt 粗体以上）、图标、边框、焦点环 3:1。只靠颜色传达状态（红=错误、绿=成功）一律不合格，要加图标或文案。
+
+强制色彩模式（forced colors）下，系统会强制替换颜色并删掉阴影与渐变，所以要用系统色关键字，并给纯装饰补 `forced-color-adjust`：
+
+```css
+@media (forced-colors: active) {
+  .btn { border: 1px solid ButtonText; }         /* 系统色，别写死品牌色 */
+  .icon { forced-color-adjust: none; }           /* 只有装饰性图标才豁免 */
+  .chart { background: CanvasText; }             /* 用 Canvas / CanvasText 画对比 */
+}
+```
+
+**对比**：
+
+| 做法 | 普通模式 | 强制色彩模式 |
+| --- | --- | --- |
+| 写死 `#2563eb` 边框 | 好看 | 可能与被替换的背景同色，直接消失 |
+| `border: 1px solid ButtonText` | 跟随主题 | 系统保证可辨 |
+| 仅用背景色区分选中 | 能看出 | 背景被统一，选中态消失 |
+| 背景色 + 图标/边框 | 能看出 | 仍可辨 |
+
+### 3.3 动效：`prefers-reduced-motion` 不是「关掉一切」
+
+**没它会怎样**：页头每 3 秒视差横移一次，卡片入场从屏幕外飞入。对前庭功能敏感的用户，这会引发眩晕甚至恶心——而系统里那个「减少动态效果」开关，你的页面完全无视。
+
+这段代码演示取舍：减少的是位移、缩放、视差这类「空间运动」，保留淡入这类低风险过渡。
+
+```css
+@media (prefers-reduced-motion: reduce) {
+  .card { animation: pg-fade .2s ease both; }     /* 换成淡入 */
+  .hero { animation: none; }                      /* 视差直接取消 */
+  .drawer { transition: none; }                   /* 位移过渡取消 */
+}
+@media (prefers-reduced-motion: no-preference) {
+  .card { animation: pg-slide-in .35s ease both; }
+}
+```
+
+**浏览器做了什么**：`prefers-reduced-motion` 读取系统偏好，值为 `reduce` 或 `no-preference`。它不是「禁用 CSS 动画」的开关，而是给你一个分支：你要自己决定哪些动效可以留。默认值随平台而异，所以两条分支都写清楚，别只写 `reduce`。滚动驱动的视差、`scroll-behavior: smooth`、自动轮播也要一起处理。
+
+**对比**：
+
+| 做法 | 敏感用户 | 普通用户 |
+| --- | --- | --- |
+| 只有飞入动画 | 眩晕，只能离开页面 | 观感好 |
+| 全部 `animation: none` | 舒服 | 信息层级变弱（不知道新内容从哪来） |
+| 位移换淡入 | 舒服 | 仍有「新内容出现」的提示 |
+
+下面 playground 用一个开关模拟系统偏好，对比「横移」与「淡入」两种处理。
+
+```jsx playground
+import { useState } from 'react';
+
+export default function App() {
+  const [reduce, setReduce] = useState(false);
+  return (
+    <div className={reduce ? 'pg-motion is-reduce' : 'pg-motion'}>
+      <button className="pg-motion-btn" onClick={() => setReduce(!reduce)}>
+        模拟「减少动态效果」：{reduce ? '开' : '关'}
+      </button>
+      <div className="pg-motion-stage"><span className="pg-motion-dot" /></div>
+      <p className="pg-motion-tip">
+        {reduce ? '现在只做透明度变化，没有位移。' : '现在做横移，位移幅度较大。'}
+      </p>
+      <style>{`
+        .pg-motion { display: grid; gap: 10px; justify-items: start; font: 14px/1.6 system-ui, sans-serif; }
+        .pg-motion-btn { padding: 6px 14px; border: 1px solid #c8ccd4; border-radius: 8px; background: #fff; cursor: pointer; font: inherit; }
+        .pg-motion-stage { inline-size: 100%; overflow: hidden; padding: 10px 0; }
+        .pg-motion-dot { display: block; inline-size: 28px; block-size: 28px; border-radius: 50%; background: #2563eb; animation: pg-slide 1.4s ease-in-out infinite alternate; }
+        .pg-motion.is-reduce .pg-motion-dot { animation: pg-fade 1.4s ease-in-out infinite alternate; }
+        .pg-motion-tip { margin: 0; color: #4a5262; }
+        @keyframes pg-slide { from { transform: translateX(0); } to { transform: translateX(180px); } }
+        @keyframes pg-fade { from { opacity: .25; } to { opacity: 1; } }
+      `}</style>
+    </div>
+  );
+}
+```
+
+## 📋 决策速查
+
+两个最常见的最小修正，先记这两段，其余按表查：
+
+```html
+<!-- 语义修正：把可点击的 div 换成 button，键盘能力立刻回来 -->
+<button type="button">保存</button>
+```
+
+```css
+/* 焦点修正：只为键盘操作画环，鼠标用户看不到框 */
+:focus-visible { outline: 3px solid CanvasText; outline-offset: 2px; }
+```
+
+| 你想实现 | 用什么 | Baseline | 注意 |
+| --- | --- | --- | --- |
+| 可点击元素 | `button` / `a` | Widely | 别用 `div` + click |
+| 只在键盘操作时显示焦点 | `:focus-visible` | Widely | 对比度 ≥ 3:1，别用 `box-shadow` |
+| 屏蔽背景交互与读屏 | `inert` | Widely | 外观不变，另加视觉遮罩 |
+| 模态焦点管理 | `dialog` + `showModal()` | Widely | 别再手写焦点陷阱 |
+| 编辑后才报错 | `:user-invalid` + `aria-invalid` | 2023-11 | 两者同一时刻同步 |
+| 播报但不抢焦点 | `role="status"` | Widely | 用 `opacity` 隐藏，别用 `display: none` |
+| 明暗两套配色 | `color-scheme` + `light-dark()` | 2024-05 | 不要覆盖根字号 |
+| 正文对比度 | 4.5:1（大字与图标 3:1） | WCAG 2.2 | 颜色之外要有第二重指示 |
+| 高对比模式适配 | `forced-colors: active` + 系统色 | Widely | 渐变与阴影会被删 |
+| 尊重减少动态 | `prefers-reduced-motion` | Widely | 位移换淡入，不是全关 |
+| 字号跟随系统 | `text-scale` meta | Chromium 146+ | 排版全用相对单位 |
+
+## ⚠️ 五个常见坑
+
+1. **只在 `:focus` 上做文章**。`:focus` 鼠标点击也匹配，去掉它就等于让键盘用户失明；留着它又让鼠标用户嫌丑。用 `:focus-visible` 分开处理。
+2. **用 `aria-hidden` 遮挡背景**。它挡不住键盘，Tab 照样能进背景，形成幽灵焦点；要挡住就用 `inert`。
+3. **错误状态一加载就出现**。`:invalid` 在空值时就匹配，用户还没动手整片标红；用 `:user-invalid` 等到「编辑过或提交过」。
+4. **只用颜色表达状态**。选中、错误、成功全用底色区分，色觉障碍与强制色彩模式下全失效；配图标、边框或文案。
+5. **把 `prefers-reduced-motion` 写成全部禁用**。用户失去了「新内容出现」的提示；正确做法是把位移、缩放、视差换成淡入。
+
+## ✅ 自测三问
+
+1. 拔掉鼠标，从地址栏按 Tab 进来，你能跳过导航、打开菜单、关闭对话框，并且每一步都清楚焦点在哪吗？
+2. 打开系统深色模式，再切到 Windows 高对比模式，你的正文、边框、选中态、错误提示还分得清吗？
+3. 用单色滤镜（或截图转灰度）看一遍页面，所有靠颜色区分的信息还有别的线索吗？
+
+## 关键要点
+
+- **语义是免费的地基**：`button`、`a`、`dialog`、`nav`、`main` 自带角色、键盘与读屏播报；用 `div` 重造，等于把地基挖掉再自己搭。
+- **焦点三件事**：看得见（`:focus-visible` + 3:1）、进得去（不要正数 `tabindex`）、出得来（`inert` 与 `showModal()` 负责边界）。
+- **播报别抢焦点**：用常驻的 `role="status"` 播报，错误提示靠 `aria-describedby` 附带读出，`assertive` 只留给真正紧急的事。
+- **两套配色一份声明**：`color-scheme` 决定系统控件，`light-dark()` 决定自定义颜色；主题开关改的是 `color-scheme`，不是复制一套变量。
+- **可访问性是可测的**：键盘走一遍、读屏听一遍、灰度看一眼、切一次高对比——四个动作比背条款有效。
+
+## 延伸阅读
+
+- [WCAG 2.2 快速参考](https://www.w3.org/WAI/WCAG22/quickref/) ｜ [WAI-ARIA 作者实践](https://www.w3.org/WAI/ARIA/apg/)
+- [`inert`（MDN）](https://developer.mozilla.org/docs/Web/API/HTMLElement/inert) ｜ [`:focus-visible`（MDN）](https://developer.mozilla.org/docs/Web/CSS/:focus-visible)
+- [`light-dark()`（MDN）](https://developer.mozilla.org/docs/Web/CSS/color_value/light-dark) ｜ [forced-colors 模式](https://developer.mozilla.org/docs/Web/CSS/@media/forced-colors)
+- [prefers-reduced-motion（MDN）](https://developer.mozilla.org/docs/Web/CSS/@media/prefers-reduced-motion) ｜ [WebAIM：对比度检查器](https://webaim.org/resources/contrastchecker/)
+
+---
+
+← 上一章：[05 组件与 UX 模式](/web/05-components-ux) ｜ 下一章：[07 性能与 Core Web Vitals](/web/07-performance)

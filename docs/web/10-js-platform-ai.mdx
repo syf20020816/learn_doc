@@ -1,0 +1,715 @@
+---
+title: 10 · JS 平台能力与内置 AI
+description: 从 Date 的时区陷阱到 Temporal 的三种时间模型、国际格式化、浏览器内置 AI，再到 clip-path 与 Canvas/3D——把过去装包解决的问题交还平台。
+---
+
+# 第 10 章 JS 平台能力与内置 AI
+
+> **难度**：🔴 高阶 ｜ **前置**：[03 动效与视图过渡](/web/03-motion-view-transitions)、[09 Web Components](/web/09-web-components) ｜ **学完你能**：用 `Temporal` 算出跨时区的「还剩几天」，用 `Intl` 换日历，并在内置 AI 不可用时给出体面的降级。
+
+**这一章要解决的毛病**
+
+- 页面上明明写的是 2026-03-08，到了国外打开变成 2026-03-07，用户以为活动提前一天结束。
+- 为了一个日期选择器装了 `dayjs`、`timezone`、`locale` 三个包，打包体积涨了 40 KB，还各有一套 API。
+- 「一键摘要」上线后模型没下载成功，页面留了一大片空白，用户以为功能坏了。
+
+这一章的主线是：**平台已经能做，就别再装包**。但平台能力有版本差，所以每一节都按「先跑起来 → 组合成场景 → 兼容与降级」三步走。判断标准也统一：先问 API 在不在，再决定走增强还是走老路。
+
+## 🟢 入门：先让它跑起来
+
+入门只讲三件事：先用内置原语替掉几个包，再分清「时间点」和「日历上的日期」，最后用一行 CSS 让滚动内容自己淡出。这三个例子都短，但各自代表一类「你以为要装包、其实不用」的问题。
+
+### 1.1 内置原语替掉三个包（js）
+
+**没它会怎样**：为了深拷贝状态写成 `JSON.parse(JSON.stringify(obj))`，结果 `Date` 变成字符串、`Map` 变成空对象、循环引用直接报错；为了给 `fetch` 加超时，手写 `AbortController` 加 `setTimeout`，忘了清理定时器，页面切走后还在跑。
+
+五个场景，五个内置原语，每段都只差一行：
+
+```js
+// 1. 深拷贝：保留 Date、Map、Set 与循环引用
+const copy = structuredClone(sessionState);
+
+// 2. 排序不原地改，返回新数组
+const byPriority = tasks.toSorted((a, b) => b.priority - a.priority);
+
+// 3. 分组返回 null 原型对象，不会撞到 constructor
+const byRegion = Object.groupBy(deliveries, (d) => d.region);
+
+// 4. 超时与用户取消合并成一个信号
+const signal = AbortSignal.any([userSignal, AbortSignal.timeout(5000)]);
+
+// 5. 原子替换子节点，不走 HTML 解析器
+list.replaceChildren(...items);
+```
+
+**浏览器做了什么**：`structuredClone()` 走结构化克隆算法（structured clone），由宿主实现，比手写递归快且不会栈溢出；`toSorted` / `with` / `toReversed` 属于「复制版数组方法」，返回新数组、不动原数组；`Object.groupBy` 返回的对象原型是 `null`，读取要用 `??` 或 `Object.hasOwn()`，不能调 `hasOwnProperty`。
+
+一处细节：清空列表用 `replaceChildren()`，不要用 `innerHTML = ''`——前者直接操作节点，无解析、无注入面，在 Trusted Types 环境里也不会抛错。
+
+**对比**——老写法不是「啰嗦」，而是每一处都藏着一类静默错误：
+
+| 维度 | 以前的做法 | 现在 |
+| :--- | :--- | :--- |
+| 深拷贝 | `JSON` 往返或 `lodash.cloneDeep` | `structuredClone()` |
+| 不可变排序 | `[...arr].sort()` 多一次分配 | `arr.toSorted()` |
+| 分组 | `reduce` 手写累加器 | `Object.groupBy()` |
+| 超时取消 | 手动 `AbortController` | `AbortSignal.timeout()` |
+| 清空列表 | `innerHTML = ''`，Trusted Types 下报错 | `replaceChildren()` |
+
+### 1.2 日期不是时间点：Temporal 的三种模型（capture-location-agnostic-data）
+
+**没它会怎样**：把生日、账单日、活动日期存成 `Date`，等于给它绑定了一个瞬间。用户在 UTC 以西打开，日期就少一天——最典型的是 3 月 8 日显示成 3 月 7 日，运营看到后台还以为是时区配错了。
+
+先看同一个字符串，两种模型的差别：
+
+```js
+// ❌ Date 是时间戳：'2026-03-08' 被解析成 UTC 零点
+const d = new Date('2026-03-08');
+d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }); // 2026-03-07
+
+// ✅ PlainDate 只表示日历上的那一天，没有时区
+const plain = Temporal.PlainDate.from('2026-03-08');
+plain.toString();                    // 任何时区都是 2026-03-08
+plain.add({ days: 1 }).toString();   // 2026-03-09
+```
+
+**浏览器做了什么**：`Date` 内部只有一个毫秒时间戳，显示时必须经过某个时区换算；`Temporal.PlainDate` 不存时间戳，只存年月日，所以不存在「换算」这一步。日历跨度同理：一个月不是固定毫秒，`PlainDate.add({ months: 1 })` 按日历规则平衡，1 月 31 日默认夹到 2 月最后一天。
+
+Temporal 一共三种模型，选错就会静默漂移，所以必须先分清楚：
+
+```js
+// 1. Instant：时间轴上的一个绝对点，只到 UTC，不带时区
+const t = Temporal.Instant.from('2026-03-08T12:00:00Z');
+
+// 2. ZonedDateTime：某地某时，带时区规则，跨夏令时也对
+const meeting = Temporal.ZonedDateTime.from('2026-03-08T09:00[Asia/Shanghai]');
+
+// 3. Plain*：日历上的读数，没有时间也没有时区
+const birthday = Temporal.PlainDate.from('1995-06-12');
+```
+
+**对比**——三种模型不是 API 差异，而是「你在回答哪个问题」：
+
+| 维度 | `Instant` | `ZonedDateTime` | `PlainDate` |
+| :--- | :--- | :--- | :--- |
+| 回答的问题 | 发生在哪一刻 | 当地几点开会 | 日历上是哪一天 |
+| 带时区 | 否，只有 UTC | 是 | 否 |
+| 适合数据 | 日志、埋点、创建时间 | 会议、航班、营业时间 | 生日、账单日、活动日期 |
+| 加一天 | 固定加 24 小时 | 按真实时区，可能 23 或 25 小时 | 按日历，永远下一个日期 |
+| 序列化 | ISO 带 `Z` | ISO 带 `[时区]` | 纯 `YYYY-MM-DD` |
+
+这段 demo 演示同一句「2026-03-08」在不同时区下的两种读法，并检测当前环境有没有 `Temporal`：有就展示 `PlainDate`，没有就降级用 `Date` 加 `timeZone` 对比，让差异自己显形。
+
+```jsx playground
+import { useState } from 'react';
+
+const ZONES = [
+  ['Asia/Shanghai', '上海（UTC+8）'],
+  ['America/New_York', '纽约（UTC-5）'],
+  ['Pacific/Honolulu', '檀香山（UTC-10）'],
+];
+
+// 同一个「日历日期」，两种模型各自的读数
+function readAsDate(iso, zone) {
+  // Date 必须靠时区才能变成一个读数，换时区就可能换一天
+  const d = new Date(iso + 'T00:00:00Z');
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(d);
+}
+function readAsPlain(iso) {
+  const T = globalThis.Temporal;
+  // 有 Temporal 就按日历读，任何时区都是同一天
+  return T ? T.PlainDate.from(iso).toString() : '（当前环境无 Temporal）';
+}
+
+export default function App() {
+  const [zone, setZone] = useState('America/New_York');
+  const hasTemporal = typeof globalThis.Temporal !== 'undefined';
+  return (
+    <div className="pg-tz">
+      <div className="pg-tz__row">
+        {ZONES.map(([id, label]) => (
+          <button
+            type="button"
+            key={id}
+            className={id === zone ? 'pg-tz__btn pg-tz__btn--on' : 'pg-tz__btn'}
+            onClick={() => setZone(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="pg-tz__grid">
+        <div className="pg-tz__cell">
+          <span className="pg-tz__key">Date（时间点）</span>
+          <strong className="pg-tz__drift">{readAsDate('2026-03-08', zone)}</strong>
+        </div>
+        <div className="pg-tz__cell">
+          <span className="pg-tz__key">PlainDate（日历）</span>
+          <strong className="pg-tz__safe">{readAsPlain('2026-03-08')}</strong>
+        </div>
+      </div>
+      <p className="pg-tz__tip">
+        {hasTemporal
+          ? '切换时区，左边会漂移，右边永远是 2026-03-08。'
+          : '当前环境还没 Temporal，右列显示不可用；左边仍能演示 Date 的时区漂移。'}
+      </p>
+      <style>{`
+        .pg-tz { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 10px; }
+        .pg-tz__row { display: flex; flex-wrap: wrap; gap: 6px; }
+        .pg-tz__btn { font: inherit; cursor: pointer; padding: 5px 12px; border-radius: 999px;
+          border: 1px solid #c8ccd4; background: #fff; }
+        .pg-tz__btn--on { border-color: #4a7fd4; color: #2f5fae; background: #eef4ff; }
+        .pg-tz__grid { display: flex; gap: 10px; flex-wrap: wrap; }
+        .pg-tz__cell { flex: 1; min-inline-size: 160px; padding: 10px 12px;
+          border: 1px solid #dfe3ea; border-radius: 10px; display: grid; gap: 2px; }
+        .pg-tz__key { font-size: 12px; color: #5b6473; }
+        .pg-tz__drift { color: #c0504d; }
+        .pg-tz__safe { color: #2f9e6b; }
+        .pg-tz__tip { margin: 0; color: #5b6473; font-size: 13px; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+看左列切换：同一句 `2026-03-08`，在纽约会被读成 03-07。这不是浏览器 bug，而是 `Date` 本来只表示一个瞬间，你给它绑的时区变了，读数自然跟着变。
+
+下一节开始进入真实场景：时间不再是「显示格式」问题，而是「算错几个小时」的问题。
+
+## 🟡 进阶：真实工程里的组合用法
+
+进阶的四个场景都从一句需求出发：跨时区倒计时、高精度事件排序、多日历展示、内置 AI 摘要。它们的共同点是——先选对模型，再谈代码。
+
+### 2.1 场景一：跨时区活动倒计时（coordinate-global-events）
+
+**需求**：活动页显示「还剩 3 个月 12 天 4 小时」，用户在任何时区打开都指向同一个结束时刻，过期判断不能差一天。
+
+**方案**：结束时间用带时区的 `ZonedDateTime`，差值用 `until()` 并显式给 `largestUnit`，展示交给 `Intl.DurationFormat`。
+
+```js
+const tz = 'Asia/Shanghai';
+const now = Temporal.Now.zonedDateTimeISO(tz);
+
+// 分开的日期与时间串交给 Temporal 拼，不要用模板字符串拼 ISO
+const end = Temporal.PlainDate.from('2026-12-31')
+  .toPlainDateTime('23:59')
+  .toZonedDateTime(tz);
+
+const left = now.until(end, { largestUnit: 'day', smallestUnit: 'minute' });
+left.toLocaleString('zh-CN', { style: 'long' }); // 1 个月 12 天 4 小时（给用户看）
+left.toString();                                 // P41DT4H3M（给接口）
+left.sign < 0;                                   // 是否已过期
+```
+
+最容易被忽略的是夏令时（DST, Daylight Saving Time）。结束时间如果落进时钟跳变的空档，这个时刻根本不存在，默认行为会悄悄挪一个小时：
+
+```js
+// ❌ 默认 disambiguation: 'compatible'，不存在的 02:30 会被挪到 03:30
+const a = Temporal.ZonedDateTime.from('2026-03-08T02:30[America/New_York]');
+
+// ✅ 严格模式：跳变或重叠直接抛 RangeError，让线上早暴露
+const b = Temporal.ZonedDateTime.from(
+  '2026-03-08T02:30[America/New_York]',
+  { disambiguation: 'reject' }
+);
+```
+
+**对比**——手算毫秒和按日历算，误差不是「差一点」，而是「差一小时或一天」：
+
+| 维度 | 手算毫秒 | `Temporal.Duration` + `ZonedDateTime` |
+| :--- | :--- | :--- |
+| 跨月 | 一个月按 30 天估，误差随时出现 | 按日历平衡，结果可解释 |
+| 夏令时 | 一天固定 86400000 毫秒，差一小时 | 按真实时区算，23/25 小时都对 |
+| 展示 | 自己拼「天/小时」字符串 | `toLocaleString()` 直接出人话 |
+| 精度 | `Date` 只到毫秒 | `Instant` 到纳秒 |
+
+### 2.2 场景二：高精度排序与时长差分（sort-high-precision-timestamps）（calculate-event-differentials）
+
+**需求**：埋点事件同一毫秒内来了三条，排序不能乱；两个时间点之间的时长要能展示成人话。
+
+**方案**：排序在 `Instant` 上做，`Date` 会把亚毫秒直接截掉；时长留在 `Duration` 上，不要折算成单个数字。
+
+```js
+const events = [
+  { id: 'a', at: Temporal.Instant.from('2026-03-08T12:00:00.000000001Z') },
+  { id: 'b', at: Temporal.Instant.from('2026-03-08T12:00:00.000000002Z') },
+];
+
+// Date 版本会认为两者相等，因为毫秒之后的部分被截掉
+events.sort((x, y) => Temporal.Instant.compare(x.at, y.at)); // a 在 b 前
+```
+
+时长展示统一走 `Duration`，`toLocaleString()` 出人话，`toString()` 出 ISO 8601：
+
+```js
+const d = Temporal.Instant.from('2026-01-01T00:00:00Z')
+  .until(Temporal.Instant.from('2026-01-03T04:30:00Z'))
+  .round({ largestUnit: 'hour' });
+
+d.toString();                              // PT52H30M
+d.toLocaleString('zh-CN', { style: 'long' }); // 52 小时 30 分钟
+
+// ❌ 折算成单值：约 104 天以后就超出安全整数，精度静默丢失
+const bad = d.total('nanoseconds');
+
+// ✅ 需要比较大小就用 total 的返回值做阈值判断，展示永远留在 Duration 上
+const tooLong = d.total('hours') > 48;
+```
+
+**对比**：
+
+| 维度 | 手写 `ms / 1000 / 60` | `Duration` |
+| :--- | :--- | :--- |
+| 单位进位 | 每个单位都要手写除余 | `round()` 自动平衡 |
+| 展示 | 自己拼字符串，还要管单复数 | `Intl.DurationFormat` |
+| 精度 | 极易超过安全整数 | 内部用大数，`total()` 才转数字 |
+| 可读性 | 一堆魔法数 | `{ hours: 2, minutes: 30 }` |
+
+### 2.3 场景三：同一时刻，多种日历（support-global-calendar-systems）
+
+**需求**：产品要出海，同一个「今天」在中东、东亚、欧美用户眼里可能是不同年号或不同月份，不能只写死公历。
+
+**方案**：先探测环境支持哪些日历，再用 `Intl.DateTimeFormat` 的 `calendar` 选项格式化；Temporal 侧用 `withCalendar()` 切换，跨年识别月份用 `monthCode`。
+
+```js
+const when = new Date('2026-03-08T12:00:00Z');
+
+for (const calendar of ['iso8601', 'chinese', 'buddhist', 'hebrew']) {
+  const fmt = new Intl.DateTimeFormat('zh-CN', {
+    calendar,
+    dateStyle: 'full',
+    timeZone: 'Asia/Shanghai',
+  });
+  console.log(calendar, fmt.format(when)); // 同一瞬间，不同日历读数
+}
+
+// 环境支持哪些日历，先问再切
+Intl.supportedValuesOf('calendar').includes('hebrew');
+```
+
+月份不要用数字判断，用 `monthCode`——它在不同日历里都稳定，而「第 2 个月」在农历里可能是闰月：
+
+```js
+const lunar = Temporal.PlainDate.from('2026-03-08').withCalendar('chinese');
+lunar.monthCode;      // 类似 'M1'，跨年、闰月都不会错
+lunar.monthsInYear;   // 该日历一年几个月，闰年可能是 13
+```
+
+**对比**：
+
+| 维度 | 手写农历 / 年号库 | `Intl` + `calendar` |
+| :--- | :--- | :--- |
+| 数据来源 | 自己维护换算表 | 浏览器内置 ICU 数据 |
+| 体积 | 几十 KB 起 | 0 |
+| 更新 | 跟库版本走 | 跟浏览器走 |
+| 边界 | 闰月、跨年容易错 | 用 `monthCode` 与 `monthsInYear` 规避 |
+
+### 2.4 场景四：内置 AI 的三段式接入（language-model）（summarizer）（translator）（language-detection）
+
+**需求**：给长文加「一键摘要」、给外语段落加「译文预览」、再自动判断源语言——正文不出设备。
+
+**方案**：浏览器内置模型共享同一套契约：**先特性检测 → 再查可用性 → 最后创建会话并流式消费**。`LanguageModel` 管生成，`Summarizer` 管摘要，`Translator` 管翻译，`LanguageDetector` 管语种识别。
+
+```js
+if ('LanguageModel' in self) {
+  // 先问「能不能用、要不要下载」，由用户决定何时开始
+  const availability = await LanguageModel.availability();
+  if (availability !== 'unavailable') {
+    const session = await LanguageModel.create({
+      initialPrompts: [{ role: 'system', content: '你是文档站助手，只输出中文。' }],
+    });
+    for await (const chunk of session.promptStreaming('把这段说明压缩成一句话：…')) {
+      output.append(chunk); // 边生成边渲染，别等全文
+    }
+  }
+}
+```
+
+另外三个入口骨架相同，差别在「问什么」：摘要先看输入配额，翻译先查语言对，识别先看置信度：
+
+```js
+// 摘要：超长文本要先分段，再喂给 Summarizer
+if ('Summarizer' in self && (await Summarizer.availability()) !== 'unavailable') {
+  const summarizer = await Summarizer.create({ type: 'key-points', length: 'short' });
+  summaryEl.textContent = await summarizer.summarize(articleText);
+}
+
+// 翻译：先查语言对，避免用户等到一半才知道不支持
+if ('Translator' in self) {
+  const pair = { sourceLanguage: 'en', targetLanguage: 'zh' };
+  if ((await Translator.availability(pair)) === 'available') {
+    rendered.textContent = await (await Translator.create(pair)).translate(paragraph);
+  }
+}
+
+// 语种识别：置信度低就不要猜
+if ('LanguageDetector' in self) {
+  const [best] = await (await LanguageDetector.create()).detect(userInput);
+  const source = best && best.confidence > 0.8 ? best.detectedLanguage : 'en';
+}
+```
+
+关键约束：模型可能几十 MB 到数 GB，`availability()` 就是让产品决定下载时机；会话占显存，多个组件各自 `create()` 会重复加载，应在应用层做单例或会话池，空闲时 `destroy()`；能力缺失时不要留白——摘要退化成「展开全文」，翻译退化成原文或服务端接口。
+
+这段 demo 演示完整的可用性检测：浏览器没有内置模型时不报错、不留白，而是把入口换成降级方案。
+
+```jsx playground
+import { useState } from 'react';
+
+const CAPS = [
+  ['LanguageModel', '文本生成'],
+  ['Summarizer', '摘要'],
+  ['Translator', '翻译'],
+  ['LanguageDetector', '语种识别'],
+];
+
+export default function App() {
+  const [rows, setRows] = useState([]);
+  const check = async () => {
+    const result = [];
+    for (const [name, label] of CAPS) {
+      // 第一步永远是「对象在不在」，缺失时不要直接调用
+      let state = name in globalThis ? '探测中' : '不支持';
+      if (name in globalThis) {
+        try { state = await globalThis[name].availability(); } catch { state = '探测失败'; }
+      }
+      result.push({ name, label, state });
+    }
+    setRows(result);
+  };
+  const none = rows.length > 0 && rows.every((r) => r.state !== 'available');
+  return (
+    <div className="pg-ai">
+      <button type="button" className="pg-ai__btn" onClick={check}>
+        {rows.length ? '重新检测' : '检测内置 AI 能力'}
+      </button>
+      <ul className="pg-ai__list">
+        {rows.map((r) => (
+          <li key={r.name} className="pg-ai__item">
+            <strong>{r.label}</strong>
+            <code>{r.name}</code>
+            <span className={r.state === 'available' ? 'pg-ai__ok' : 'pg-ai__dash'}>{r.state}</span>
+          </li>
+        ))}
+      </ul>
+      {none ? (
+        <p className="pg-ai__fallback">
+          本环境没有可用模型：摘要降级为「展开全文」，翻译降级为原文 + 服务端接口。
+        </p>
+      ) : null}
+      <style>{`
+        .pg-ai { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 10px; }
+        .pg-ai__btn { justify-self: start; font: inherit; cursor: pointer; padding: 6px 14px;
+          border-radius: 999px; border: 1px solid #c8ccd4; background: #fff; }
+        .pg-ai__list { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+        .pg-ai__item { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+          border: 1px solid #dfe3ea; border-radius: 8px; }
+        .pg-ai__item code { font-size: 12px; color: #5b6473; }
+        .pg-ai__item span { margin-inline-start: auto; font-weight: 600; }
+        .pg-ai__ok { color: #2f9e6b; }
+        .pg-ai__dash { color: #c0504d; }
+        .pg-ai__fallback { margin: 0; padding: 10px 12px; border-radius: 8px;
+          background: #fff6e6; color: #7a5a12; font-size: 13px; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+**对比**——内置 AI 和调后端大模型，取舍点不只是成本：
+
+| 维度 | 调后端大模型 | 浏览器内置模型 |
+| :--- | :--- | :--- |
+| 隐私 | 正文要出设备 | 推理在本地 |
+| 首次使用 | 立即可用 | 可能要下载模型 |
+| 成本 | 按 token 计费 | 用户设备承担 |
+| 能力 | 大模型更强 | 只适合增强，不适合核心路径 |
+| 兼容性 | 取决于你的服务 | 实验性，必须特性检测 |
+
+## 🔴 高阶：边界、SSR、降级
+
+高阶不再教「怎么用」，而是回答三个问题：不支持时长什么样、性能花在哪、坏起来怎么收场。这里的每个例子都带一条「效果没了，功能还在」的退路。
+
+### 3.1 CSS 图形：`clip-path`、`shape()` 与边缘渐隐（complex-shapes）（shaped-cutouts）
+
+**需求**：卡片做成异形、标签做成斜角、滚动区边缘自然淡出，而且不支持时不能塌。
+
+**方案**：几何裁切用 `clip-path`（矢量，硬边）；柔化与渐隐用 `mask-image`（可用渐变，边缘可半透明）；两者都不改变文档流，位置仍按矩形算。
+
+```css
+/* 异形卡片：几何裁切，边缘是硬的 */
+.ticket {
+  clip-path: polygon(0 0, 100% 0, 100% 70%, 70% 100%, 0 100%);
+}
+
+/* 圆形头像：几何裁切最常见的用法 */
+.avatar { clip-path: circle(50% at 50% 50%); }
+```
+
+`shape()` 是 `clip-path` 的新取值方式，可以写带变量与相对单位的形状，但支持面窄，必须用 `@supports` 渐进增强：
+
+```css
+/* 基础版：任何环境都能拿到矩形，只是没有缺口 */
+.card { border-radius: 14px; }
+
+@supports (clip-path: shape(from 0 0, line to 100% 0, line to 100% 100%)) {
+  .card {
+    /* 有 shape() 才画缺口，坐标可用百分比，跟着尺寸缩放 */
+    clip-path: shape(from 0 0, line to 100% 0, line to 100% 60%,
+      curve to 70% 100% with 90% 85%, line to 0 100%, close);
+  }
+}
+```
+
+这段 demo 演示同一个矩形在三种 `clip-path` 之间切换：形状只影响绘制，不影响布局，文字与点击区域仍是原来的矩形。
+
+```jsx playground
+import { useState } from 'react';
+
+const SHAPES = [
+  ['none', '矩形'],
+  ['polygon(0 0, 100% 0, 100% 70%, 70% 100%, 0 100%)', '切角'],
+  ['circle(50% at 50% 45%)', '圆形'],
+  ['polygon(50% 0, 100% 38%, 82% 100%, 18% 100%, 0 38%)', '五边形'],
+];
+
+export default function App() {
+  const [i, setI] = useState(1);
+  return (
+    <div className="pg-clip">
+      <div className="pg-clip__row">
+        {SHAPES.map(([value, label], idx) => (
+          <button
+            type="button"
+            key={label}
+            className={idx === i ? 'pg-clip__btn pg-clip__btn--on' : 'pg-clip__btn'}
+            onClick={() => setI(idx)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="pg-clip__stage">
+        <div className="pg-clip__box" style={{ clipPath: SHAPES[i][0] }}>
+          <strong>会员专享</strong>
+          <span>形状变了，布局没变</span>
+        </div>
+      </div>
+      <p className="pg-clip__tip">切到圆形时点击区域仍是矩形——这就是裁切与布局的分界。</p>
+      <style>{`
+        .pg-clip { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 10px; }
+        .pg-clip__row { display: flex; flex-wrap: wrap; gap: 6px; }
+        .pg-clip__btn { font: inherit; cursor: pointer; padding: 5px 12px;
+          border-radius: 999px; border: 1px solid #c8ccd4; background: #fff; }
+        .pg-clip__btn--on { border-color: #4a7fd4; color: #2f5fae; background: #eef4ff; }
+        .pg-clip__stage { display: flex; justify-content: center; padding: 8px 0; }
+        .pg-clip__box { inline-size: 200px; block-size: 140px; display: grid; place-content: center;
+          gap: 4px; text-align: center; color: #fff; background: #2f4b7c;
+          transition: clip-path .25s ease; }
+        .pg-clip__box span { font-size: 12px; opacity: .8; }
+        .pg-clip__tip { margin: 0; color: #5b6473; font-size: 13px; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+边缘渐隐（soft-edge-content-fade）用的是同一条思路，只是换成 `mask-image`：把渐变做在**容器自己**身上，让内容淡出，而不是盖一层白色渐变。后者背景色一换就穿帮，还会挡住文字选择与鼠标事件；`mask-image` 作用在合成阶段，不需要知道背景色，也不参与命中测试，代价是 2023-12 才进入 Widely。
+
+**对比**——`clip-path` 和 `mask-image` 经常被混用，其实解决的不是一类问题：
+
+| 维度 | `clip-path` | `mask-image` |
+| :--- | :--- | :--- |
+| 形状 | 只有矢量几何 | 任意图像、渐变、纹理 |
+| 边缘 | 硬边，锯齿可控但无渐变 | 可半透明、可渐隐 |
+| 对文字 | 会裁掉字形 | 同样会裁，所以要避开文字层 |
+| 不支持时 | 退回完整矩形 | 退回完整矩形 |
+
+### 3.2 文字装饰：能调，但要包在 `@supports` 里（custom-text-decorations）
+
+**需求**：正文链接的下划线要细一点、离字远一点，别在字母下缘「切」进字形。
+
+**方案**：`text-decoration-thickness`、`text-underline-offset`、`text-decoration-skip-ink` 已是稳定能力；`text-decoration-skip-spaces` 支持面窄，用 `@supports` 包住，缺失时只是空格处多一段线，不影响可用性。
+
+```css
+.article a {
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+  text-decoration-skip-ink: auto;   /* 让下划线绕开字母降部 */
+}
+
+@supports (text-decoration-skip-spaces: all) {
+  .article a { text-decoration-skip-spaces: all; }
+}
+```
+
+
+**对比**——给文字加「装饰」的三条路，代价从低到高：
+
+| 维度 | 只用默认下划线 | 调 `text-decoration-*` | 用伪元素画线 |
+| :--- | :--- | :--- | :--- |
+| 代码量 | 0 | 2~3 行 | 要定位、要处理换行 |
+| 换行表现 | 正确 | 正确 | 经常错位 |
+| 可访问性 | 天然是链接样式 | 保持 | 可能只剩颜色区分 |
+| 适合场景 | 普通正文 | 品牌正文 | 特殊排版 |
+
+### 3.3 Canvas：导出、语义与上下文丢失（export-html-media-from-canvas）（expose-canvas-content）（expose-canvas-content-to-browser-features）
+
+**需求**：图表能一键导出 PNG，画布里的文字能被查找和朗读，导出失败时用户能看到原因。
+
+**方案**：导出用稳定 API（`toBlob` / `captureStream`），语义用并行 DOM，两件事都不依赖实验特性。
+
+```js
+// 导出 PNG：toBlob 异步、不阻塞主线程，比 toDataURL 省内存
+canvas.toBlob((blob) => {
+  if (!blob) return;
+  const url = URL.createObjectURL(blob);
+  link.href = url;
+  link.download = 'chart.png';
+}, 'image/png');
+
+// 导出视频：帧率按需给，停止时把分片拼成 Blob
+const recorder = new MediaRecorder(canvas.captureStream(30), { mimeType: 'video/webm' });
+const chunks = [];
+recorder.ondataavailable = (e) => chunks.push(e.data);
+recorder.onstop = () => save(new Blob(chunks, { type: 'video/webm' }));
+recorder.start();
+```
+
+canvas 是一张位图，浏览器默认看不到里面的文字。稳定做法是并行提供一份 DOM 语义：容器给 `role="img"` 与 `aria-label`，`canvas` 内放 fallback 内容，交互命中区用绝对定位的透明按钮覆盖。
+
+```html
+<div role="img" aria-label="周活跃用户柱状图：周一 64，周二 110，周三 150">
+  <canvas id="chart" width="360" height="200">
+    周活跃用户柱状图：周一 64，周二 110，周三 150。
+  </canvas>
+  <button class="hit" style="left: 30px; top: 40px; width: 40px; height: 140px"
+          aria-label="查看周一数据">查看周一数据</button>
+</div>
+```
+
+**对比**——截屏库和原生导出的差别：
+
+| 维度 | 截屏库（如 html2canvas） | canvas 原生导出 |
+| :--- | :--- | :--- |
+| 依赖 | 额外几十 KB，逐节点重绘 | 0，浏览器自己画的 |
+| 保真 | 字体、阴影常有偏差 | 像素级准确 |
+| 导出方式 | 再转 dataURL | `toBlob()` 直接拿 Blob |
+| 适用 | 导出任意 DOM | 导出本来就是 canvas 的内容 |
+
+### 3.4 3D：拾取与 shader 的降级（interactive-content-in-3d-scenes）（apply-webgl-shaders）
+
+**需求**：3D 场景里点哪个物体能选中；背景要有随时间的动态效果；低端机不能白屏。
+
+**方案**：拾取自己算射线——把指针坐标换算成归一化设备坐标（NDC, Normalized Device Coordinates），再用相机逆矩阵投出射线；shader 每帧只更新 uniform；拿不到 WebGL2 上下文就退回静态图。
+
+```js
+canvas.addEventListener('pointerdown', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  // 屏幕坐标 → NDC：x 向右、y 向上，范围都是 -1 到 1
+  const ndc = {
+    x: ((e.clientX - rect.left) / rect.width) * 2 - 1,
+    y: -(((e.clientY - rect.top) / rect.height) * 2 - 1),
+  };
+  pickSceneObject(ndc); // 再用相机逆矩阵把 ndc 换算成射线
+});
+```
+
+```js
+const gl = canvas.getContext('webgl2');
+if (!gl) {
+  // 拿不到上下文就换静态图，别让用户看白屏
+  canvas.replaceWith(fallbackImage);
+} else {
+  // 显存压力下上下文会丢失，必须监听并恢复或回退
+  canvas.addEventListener('webglcontextlost', (e) => {
+    e.preventDefault();      // 阻止默认的永久丢失
+    showStaticFallback();
+  });
+  canvas.addEventListener('webglcontextrestored', () => rebuildScene());
+}
+```
+
+**对比**——3D 内容的两条无障碍路线：
+
+| 维度 | 只有 canvas | canvas + 并行 DOM |
+| :--- | :--- | :--- |
+| 读屏可见 | 不可见 | 可朗读名称与数值 |
+| 键盘可达 | 不可达 | 透明按钮可聚焦 |
+| 实现成本 | 低 | 每个可交互区域补一个按钮 |
+| 适合场景 | 纯装饰 | 有信息量的图表与场景 |
+
+内建 AI 与 3D 相关指南仍在演进，接口细节可能变化；这里的写法是「能力级综述 + 特性检测 + 降级路径」，落地时以你目标浏览器的实际支持为准，不要写死实验性参数。
+
+## 📋 决策速查
+
+| 你想实现 | 用什么 | Baseline | 注意 |
+| :--- | :--- | :--- | :--- |
+| 深拷贝状态 | `structuredClone()` | 2022-03 | 函数与 DOM 节点克隆不了 |
+| 不可变排序 / 替换 | `toSorted` / `with` | 2023-07 | 返回新数组，别当原地方法用 |
+| 按字段分组 | `Object.groupBy()` | 2024-01 | 返回 null 原型对象 |
+| 请求超时 | `AbortSignal.timeout()` | 2024-04 | 与用户取消用 `AbortSignal.any()` 合并 |
+| 只存「哪一天」 | `Temporal.PlainDate` | 实验性 | 别用 `Date` 存生日、账单日 |
+| 存「哪一刻」 | `Temporal.Instant` | 实验性 | 日志、埋点统一用 UTC |
+| 存「某地几点」 | `Temporal.ZonedDateTime` | 实验性 | 夏令时用 `disambiguation: 'reject'` |
+| 算时长 | `Temporal.Duration` | 实验性 | 展示用 `toLocaleString()` |
+| 格式化日期 | `Intl.DateTimeFormat` | Widely | 一定显式给 `timeZone` |
+| 非公历日历 | `calendar` 选项 | 2020 起 | 月份判断用 `monthCode` |
+| 长文摘要 / 翻译 | `Summarizer` / `Translator` | 实验性 | 先 `availability()` 再 `create()` |
+| 异形裁切 | `clip-path` | 2021 起 Widely | 影响绘制，不影响布局 |
+| 滚动边缘渐隐 | `mask-image` | 2023-12 | 别盖白色渐变层 |
+| 导出画布图片 | `canvas.toBlob()` | Widely | 用 `toBlob` 而不是 `toDataURL` |
+| 画布可被读屏 | 并行 DOM + `role="img"` | Widely | canvas 内放 fallback 文本 |
+
+## ⚠️ 五个常见坑
+
+1. **把日历日期存成 `Date`**。它在 UTC 里被解释成瞬间，UTC 以西的用户会看到前一天；生日、账单日、活动日一律用 `PlainDate` 或纯字符串。
+2. **`largestUnit` 不写，天数变小时**。`until()` 默认最大单位是小时，跨月倒计时会得到「1234 小时」，用户读不出还剩几个月。
+3. **`availability()` 当作 `create()` 的替代**。它只回答「能不能用」，不创建会话；真正调用前还要处理 `downloadable` 的下载请求。
+4. **AI 结果是同步取的**。`promptStreaming` 是异步流，直接 `textContent = session.prompt(...)` 会拿到 Promise 字符串：
+
+```js
+// ❌ 页面上出现 [object Promise]
+el.textContent = session.prompt('总结这段');
+
+// ✅ 流式消费，边到边渲染
+for await (const chunk of session.promptStreaming(text)) el.append(chunk);
+```
+
+5. **`clip-path` 当布局用**。它只影响绘制，元素仍占矩形空间，点击区域也不变；需要真正改变布局就用 `float`、Grid 或 `shape-outside`。
+
+## ✅ 自测三问
+
+**一问**：运营说「3 月 8 日的活动，美国用户看到 3 月 7 日」，问题出在哪一行？
+
+答：日期被存成 `new Date('2026-03-08')`，它被解析为 UTC 零点；在 UTC 以西显示时换算成前一天。应改用 `Temporal.PlainDate` 或原样保存 `'2026-03-08'` 字符串，只在需要瞬间时才转 `Instant`。
+
+**二问**：倒计时在夏令时切换当天为什么少了一小时？
+
+答：用固定 24 小时当天数在算。改用 `ZonedDateTime` 之间的 `until()`，让时区规则参与计算；构造不存在的本地时间时用 `disambiguation: 'reject'` 早暴露。
+
+**三问**：内置 AI 检测都通过，但摘要按钮点了没反应，先查什么？
+
+答：查 `availability()` 的返回值是不是 `downloadable`（模型还没下载，需要用户确认），再查会话是否被重复创建、显存是否吃紧；最后确认降级文案是否覆盖了「模型不可用」这种中间状态。
+
+## 关键要点
+
+1. 先问「平台有没有」：`structuredClone`、`toSorted`、`Object.groupBy`、`AbortSignal` 能替掉一批小包。
+2. `Date` 只表示瞬间；日历日期用 `PlainDate`，本地会议用 `ZonedDateTime`，日志用 `Instant`，三者不要混用。
+3. 时长留在 `Duration` 上，别折算成单个数字；排序与比较在 `Instant` 上做，保精度。
+4. 内置 AI 的接入顺序永远是「特性检测 → `availability()` → 创建会话 → 流式消费」，并且每一层都要有降级路径。
+5. `clip-path` / `mask-image` / canvas 都只影响绘制与呈现：布局、语义、键盘可达要另外补。
+
+## 延伸阅读
+
+- [MDN：Temporal](https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/Temporal) —— 三种时间模型与 `Duration`
+- [MDN：Intl.DateTimeFormat](https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat) —— `calendar`、`timeZone` 与格式化
+- [MDN：clip-path](https://developer.mozilla.org/zh-CN/docs/Web/CSS/clip-path) —— 几何裁切与 `shape()`
+- [MDN：Canvas API](https://developer.mozilla.org/zh-CN/docs/Web/API/Canvas_API) —— 导出、`captureStream` 与上下文
+- [WCAG 2.2 · 1.4.1 Use of Color](https://www.w3.org/TR/WCAG22/#use-of-color) —— 别只靠颜色传达信息
+
+---
+
+← 上一章：[09 Web Components](/web/09-web-components) ｜ 返回 [前端最新实现总览](/web/)

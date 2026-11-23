@@ -1,0 +1,650 @@
+---
+title: 01 · HTML 与原生交互
+description: 从单个 dialog 到声明式 popover、commandfor 指挥弹窗、interestfor 悬停预览——把弹窗最脏的五件事交还给浏览器。
+---
+
+# 第 1 章 HTML 与原生交互
+
+> **难度**：🟢 入门 ｜ **前置**：无 ｜ **学完你能**：用原生标签做出可键盘操作、点外可关、Esc 可退的弹窗与菜单，并说清它替你省掉了哪五件事。
+
+**这一章要解决的毛病**
+
+- 自制弹窗打开后，Tab 还能一路跳到底下页面；Esc 关不掉，关掉之后焦点又掉回页面顶部。
+- 下拉菜单被父级 `overflow: hidden` 裁掉半截，`z-index` 加到 9999 也压不住一个带 `transform` 的祖先。
+- 为了「点空白处关闭」在 `document` 上挂 click，结果点菜单内部也关了，只好逐层判断 `e.target`。
+
+这三个毛病其实是同一件事：**弹窗不是「一个 div 加一个 class」，而是层级、焦点、关闭、滚动、无障碍五件事的组合**。过去每一件都要手写，现在浏览器把它们内建进了 `<dialog>`、`popover`、`commandfor`、`interestfor` 四个入口。这一章按「单个弹窗 → 声明式显隐 → 按钮指挥弹窗 → 悬停预览」的顺序往上走，每一步只多学一个属性。
+
+## 🟢 入门：先让它跑起来
+
+### 1.1 一个标签就是模态框（html · dialog）
+
+**没它会怎样**：你用一个 `<div class="modal">` 做确认框，`position: fixed` 配 `z-index: 9999`，看着没问题；一旦某个祖先带了 `transform`，`fixed` 就退化成相对该祖先定位，弹窗直接跑到屏幕外。用户还发现按 Tab 能选中文档底部的链接，读屏器也照读被「盖住」的内容。
+
+**最小例子**：把模态交给 `<dialog>`，用 `showModal()` 打开。这段在演示「一个标签 + 一行 JS」就能得到一个真正截断页面交互的模态框。
+
+```html
+<dialog id="confirm">
+  <h2>确认删除？</h2>
+  <p>删除后不可恢复。</p>
+  <form method="dialog">
+    <button value="cancel" autofocus>取消</button>
+    <button value="delete">删除</button>
+  </form>
+</dialog>
+```
+
+```js
+const dialog = document.querySelector('#confirm');
+dialog.showModal();                 // 模态打开：惰化页面 + 焦点圈闭
+
+dialog.addEventListener('close', () => {
+  console.log(dialog.returnValue);  // "cancel" 或 "delete"
+});
+```
+
+**浏览器做了什么**：
+
+- `showModal()` 把对话框提升到**顶层**（top layer）。顶层不参与普通文档流的绘制顺序，所以祖先的 `overflow: hidden`、`transform`、`z-index` 全都管不着它。
+- 同时把文档其余部分**惰化**（inert）：鼠标点不到、Tab 进不去、读屏器也跳过。惰化不是加个半透明遮罩就完事，它是渲染层面真把子树的可交互性关掉了。
+- 焦点自动交给对话框里的第一个可聚焦元素，并在内部循环；按 Esc 先触发 `cancel`（可拦截），再触发 `close`（已发生）。
+- `<form method="dialog">` 的按钮值直接写进 `returnValue`，页面不刷新、表单不提交。
+
+**对比**：
+
+| 维度 | 老写法：`div` + `show()` 手写 | 现代写法：`dialog` + `showModal()` |
+| --- | --- | --- |
+| 代码量 | 80~150 行（开合、遮罩、焦点、Esc） | 0 行逻辑，结构写在 HTML 里 |
+| 焦点 | 自己找可聚焦元素、手写 Tab 循环 | 浏览器把焦点圈闭在对话框内 |
+| 层级 | 依赖 `z-index`，被 `transform` 祖先打回原形 | 顶层渲染，不受祖先影响 |
+| 读屏器 | 需要自己补 `role="dialog"` / `aria-modal` | 原生语义，不要重复声明 |
+
+两条容易写坏的细节：不要用 `dialog.open = true` 或 `show()` 打开模态——它们只改显示，不惰化页面、没有遮罩；破坏性操作的 `autofocus` 要放在「取消」上，而不是「删除」上。
+
+下面这段可以改着玩。试试把 `closedby` 改成 `"none"`，Esc 与遮罩点击就都不再能关闭；再把 `dialog::backdrop` 里的背景色删掉，观察遮罩层的区别。
+
+```jsx playground
+import { useRef } from 'react';
+
+export default function App() {
+  const ref = useRef(null);
+  return (
+    <div className="pg-dlg">
+      <button className="pg-btn" onClick={() => ref.current?.showModal()}>
+        删除文件
+      </button>
+
+      <dialog ref={ref} closedby="any" aria-labelledby="pg-dlg-title">
+        <h3 id="pg-dlg-title">确认删除？</h3>
+        <p>试试三种关法：Esc、点遮罩、点按钮。注意背后内容已经点不动了。</p>
+        <form method="dialog">
+          <button className="pg-btn" value="cancel" autoFocus>取消</button>
+          <button className="pg-btn pg-danger" value="delete">删除</button>
+        </form>
+      </dialog>
+
+      <style>{`
+        .pg-dlg { font: 14px/1.6 system-ui, sans-serif; }
+        .pg-btn { padding: 6px 14px; border-radius: 8px; border: 1px solid #c8ccd4; background: #fff; cursor: pointer; font: inherit; }
+        .pg-danger { border-color: #e5a3a3; color: #b3261e; }
+        .pg-dlg dialog { border: 0; border-radius: 14px; padding: 22px 26px; box-shadow: 0 18px 50px rgb(0 0 0 / .22); max-inline-size: 320px; }
+        .pg-dlg dialog::backdrop { background: rgb(15 18 26 / .45); }
+        .pg-dlg dialog form { display: flex; gap: 8px; justify-content: flex-end; margin: 0; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 1.2 浮层不必自己叠 z-index（declarative-dialog-popover-control）
+
+**没它会怎样**：下拉菜单用 `position: absolute` 挂在按钮下面，父级一旦有 `overflow: auto`，菜单就被裁成一窄条；点页面空白处不关闭；打开时背后内容还能被 Tab 选中。
+
+**最小例子**：一个按钮加一个带 `popover` 的列表，用 `popovertarget` 把两者连起来。这段在演示零 JS 的「点开、点外关、Esc 关」。
+
+```html
+<button type="button" popovertarget="actions">操作</button>
+
+<ul id="actions" popover>
+  <li><button type="button">重命名</button></li>
+  <li><button type="button">复制链接</button></li>
+  <li><button type="button">删除</button></li>
+</ul>
+```
+
+**浏览器做了什么**：
+
+- 带 `popover` 的元素默认 `display: none`，打开时进入 top layer 并变成可见。层级问题从此不在 CSS 里解决。
+- `popover="auto"` 自带 **light dismiss**：点外部、按 Esc、或者打开另一个 auto popover，当前这个自动关闭。
+- 关闭后焦点回到触发器，触发器上的 `aria-expanded` 也由浏览器维护——不要再手写一遍，写两遍反而会打架。
+- 与对话框的关键区别：popover **不惰化页面、不圈闭焦点**。它是「非模态」浮层，适合菜单、Toast、提示；打断式确认仍用 `dialog`。
+
+**对比**：
+
+| 维度 | 老写法：绝对定位菜单 | 现代写法：popover |
+| --- | --- | --- |
+| 层级 | 被祖先 `overflow` / `transform` 裁剪 | 顶层渲染 |
+| 点外关闭 | `document` 上挂 click 再判断 `contains` | 浏览器内置 light dismiss |
+| 状态同步 | 自己切 class + `aria-expanded` | 浏览器维护 open 状态与 ARIA |
+| 键盘 | 自己处理 Esc 与焦点归还 | 内置 |
+
+`popover` 有三种取值：`auto`（自动关闭，菜单最常用）、`manual`（不自动关闭，Toast 常用）、`hint`（只关掉其他 hint，悬停提示用，见 2.3）。省略值等于 `auto`。另外，不要再给同一对触发器与目标同时写 `popovertarget` 和 `commandfor`，那会触发两次。
+
+下面这段是一个完整的小菜单。点按钮打开，点页面空白或按 Esc 关闭；打开状态下试着 Tab，会发现焦点被留在了菜单附近，而不是继续往页尾跑。
+
+```jsx playground
+export default function App() {
+  return (
+    <div className="pg-pop">
+      <button className="pg-btn" popovertarget="pg-menu" aria-haspopup="menu">
+        操作
+      </button>
+
+      <div id="pg-menu" popover="auto" className="pg-menu">
+        <button className="pg-item">重命名</button>
+        <button className="pg-item">复制链接</button>
+        <button className="pg-item pg-danger">删除</button>
+      </div>
+
+      <style>{`
+        .pg-pop { font: 14px/1.6 system-ui, sans-serif; }
+        .pg-btn { padding: 6px 14px; border-radius: 8px; border: 1px solid #c8ccd4; background: #fff; cursor: pointer; font: inherit; }
+        .pg-pop .pg-menu { border: 1px solid #dfe3ea; border-radius: 10px; padding: 6px; box-shadow: 0 12px 32px rgb(0 0 0 / .16); display: grid; gap: 2px; min-inline-size: 160px; }
+        .pg-pop .pg-item { text-align: start; padding: 8px 10px; border: 0; border-radius: 6px; background: none; cursor: pointer; font: inherit; }
+        .pg-pop .pg-item:hover { background: #f1f4f9; }
+        .pg-pop .pg-danger { color: #b3261e; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 1.3 自己写 div 弹窗，要补五件事（light-dismiss-a-dialog）
+
+**没它会怎样**：你接手一个自制弹窗，产品提了三个小需求——「按 Esc 能关」「点外面能关」「打开时后面的页面别跟着滚」。这三个需求背后是五件必须手写的事，少一件用户就会遇到：
+
+1. **焦点陷阱**：打开时把焦点移进去，Tab 到底部要绕回顶部，关闭后还给原来那个按钮。漏掉后半步，焦点会掉回页面开头，键盘用户直接迷路。
+2. **滚动锁定**：给 `body` 加 `overflow: hidden`，还要补滚动条宽度，否则整页横移一下；关的时候得原样还原。
+3. **Esc 与关闭请求**：监听 `keydown` 判断 `Escape`。如果弹窗里还有个下拉菜单也要用 Esc，就得判断谁先响应。
+4. **层级**：`z-index` 要压过页面里所有东西。祖先只要有一个 `transform` 或 `overflow: hidden`，这条路就断了。
+5. **无障碍语义**：补 `role="dialog"`、`aria-modal="true"`、可访问名称，还要把背景设成 `aria-hidden`——这一步做错，读屏器会把整页读一遍。
+
+`<dialog>` 把这五件事全部内置，你只需要声明「怎么关」：`closedby` 决定哪些关闭途径有效。
+
+```html
+<!-- 点遮罩、按 Esc、点按钮都能关 -->
+<dialog id="confirm" closedby="any" aria-labelledby="t">
+  <h2 id="t">确认删除？</h2>
+  <form method="dialog">
+    <button value="cancel" autofocus>取消</button>
+  </form>
+</dialog>
+```
+
+`closedby` 三个取值对应三种纪律：`any` 允许遮罩与 Esc；`closerequest` 只响应 Esc 等「关闭请求」（不写时的默认值，等同于省略）；`none` 只允许代码调用 `close()`，适合有未保存内容的编辑器。无论哪种，`showModal()` 打开才有遮罩与 light dismiss，用 `show()` 打开就什么都没有。
+
+**对比**：
+
+| 要补的事 | ❌ 老写法：`div` 弹窗 | ✅ 现代写法：`dialog` |
+| --- | --- | --- |
+| 焦点 | 手写 `focus()` + Tab 循环 + 还原 | 焦点圈闭与归还都内置 |
+| 滚动 | `body` 加 `overflow: hidden` 再补宽度 | 遮罩层天然挡住指针，滚动另有 CSS 方案（3.2） |
+| Esc | `keydown` 判断键码 | 原生 `cancel` 事件，可拦截 |
+| 层级 | `z-index` 竞赛 | top layer |
+| 读屏 | `role` / `aria-modal` / 背景隐藏 | 原生语义 |
+| 点外关闭 | `contains(e.target)` 判断 | `closedby="any"` |
+
+Safari 目前不认 `closedby`，表现是「点遮罩不关」，Esc 与按钮仍然可用。需要补齐时用下面这段兜底，注意判断的是点击坐标是否落在对话框矩形之外，而不是只看 `e.target`：
+
+```js
+if (!('closedBy' in HTMLDialogElement.prototype)) {
+  dialog.addEventListener('click', (e) => {
+    if (e.target !== dialog) return;   // 点内容时 target 是内部元素
+    const r = dialog.getBoundingClientRect();
+    const inside = e.clientY >= r.top && e.clientY <= r.bottom
+                && e.clientX >= r.left && e.clientX <= r.right;
+    if (!inside) dialog.close();
+  });
+}
+```
+
+## 🟡 进阶：组合起来解决真实场景
+
+### 2.1 场景一：三个关闭入口，一个返回值（platform-controls-dismiss-dialog）
+
+**需求**：一个「删除确认」要支持四种退出方式——点取消、点删除、按 Esc、手机上的返回手势——并且把用户的选择带回业务代码。
+
+**方案**：所有入口都收敛到 `close` 事件。模态对话框被平台关闭时（Esc、返回键/手势、辅助技术的关闭动作）浏览器会替你完成关闭，然后统一派发 `close`。
+
+```html
+<dialog id="confirm" closedby="any">
+  <form method="dialog">
+    <button value="cancel" autofocus>取消</button>
+    <button value="delete">删除</button>
+  </form>
+</dialog>
+```
+
+```js
+// 只在这里读一次结果，不必给每个按钮单独绑监听
+dialog.addEventListener('close', () => {
+  if (dialog.returnValue === 'delete') removeItem();
+  dialog.returnValue = '';   // 重置，避免上次的值泄漏到下一次打开
+});
+```
+
+**浏览器做了什么**：以模态方式打开时，Esc、Android 返回键、iOS 的返回手势、读屏器的「关闭」动作都会统一成一次**关闭请求**（close request）。默认情况下请求会直接关闭对话框；如果你在 `cancel` 里调用 `preventDefault()`，这次请求就被拦下——这正是「有未保存修改，先弹二次确认」该挂的地方。
+
+```js
+dialog.addEventListener('cancel', (e) => {
+  if (!isDirty) return;      // 没改动就放行，正常关闭
+  e.preventDefault();        // 有改动：拦下这次 Esc / 返回手势
+  pendingDialog.showModal(); // 再问一次「放弃修改？」
+});
+```
+
+分清两个事件的职责：`cancel` 是「即将关闭，可以反悔」，`close` 是「已经关闭，只做清理」。把保存逻辑写在 `close` 里，用户按 Esc 也会意外触发保存；把「是否放弃」的询问写在 `close` 里，已经来不及拦。
+
+**对比**：
+
+| 关闭入口 | 老写法：自己监听 | 现代写法：平台事件 |
+| --- | --- | --- |
+| Esc | `keydown` + 键码，输入法下还可能误判 | 原生 `cancel` |
+| 移动端返回 | 几乎无法可靠模拟 | 模态自动响应平台关闭请求 |
+| 点遮罩 | 算坐标或判断 `target` | `closedby="any"` |
+| 关闭后取值 | 按钮各绑一个监听 | 统一读 `returnValue` |
+
+移动端的返回手势没有可靠的 JS 模拟方案，所以把它当渐进增强接受：对话框本来就该有可见的关闭按钮，手势只是多一条路。
+
+### 2.2 场景二：按钮不再写监听器（declarative-dialog-popover-control）（custom-button-actions）
+
+**需求**：页面里有十几个「打开这个」「关掉那个」的按钮。过去每个按钮都要 `querySelector` + `addEventListener`，脚本加载晚一点，按钮就点不动。
+
+**方案**：把关系写进 HTML —— `commandfor` 指向目标 id，`command` 说明动作。浏览器在解析完标记的那一刻就把它接好了，比任何脚本都早。
+
+```html
+<button commandfor="confirm" command="show-modal">删除</button>
+
+<dialog id="confirm">
+  <button type="button" commandfor="confirm" command="close">关闭</button>
+</dialog>
+
+<button commandfor="menu" command="toggle-popover">操作</button>
+<div id="menu" popover>…</div>
+```
+
+内建命令就这几个：`show-modal` / `close` 管对话框，`show-popover` / `hide-popover` / `toggle-popover` 管浮层。三条硬规则：同一按钮不要同时写 `popovertarget` 和 `commandfor`（会触发两次）；位于 `form` 内的命令按钮必须显式 `type="button"`，否则默认提交表单；用 `hide-popover` 隐藏自身所在的浮层后，焦点会丢，需要脚本把它还给触发器。
+
+**对比**：
+
+| 维度 | ❌ 老写法：每个按钮绑事件 | ✅ 现代写法：`commandfor` |
+| --- | --- | --- |
+| 生效时机 | 脚本执行之后 | HTML 解析完立即可用 |
+| 代码量 | 每个按钮 3~5 行 | 两个属性 |
+| 状态同步 | 自己维护 `aria-expanded` | 内建命令自动同步 |
+| 动态插入 | 插入后还要重新绑定 | 标记跟着节点走，无需重绑 |
+
+自定义命令用来表达「按钮要做的业务动作」，命令名必须以 `--` 开头，避免和未来的内建命令撞名。注意 `command` 事件**不冒泡**，监听器必须直接绑在目标元素上：
+
+```html
+<button commandfor="player" command="--spin">旋转</button>
+<div id="player"></div>
+<script>
+  // command 事件不冒泡：绑在目标上，或加 { capture: true } 委托到祖先
+  document.getElementById('player').addEventListener('command', (e) => {
+    if (e.command !== '--spin') return;
+    const on = e.target.classList.toggle('is-spun');
+    e.source?.setAttribute('aria-pressed', String(on)); // 自定义命令没有内置语义
+  });
+</script>
+```
+
+下面是第三个 playground：按钮用 `commandfor` 直接打开对话框。如果你的浏览器还不支持 Invoker Commands，代码里的 `useEffect` 会检测原型并补一个 click 兜底——这正是生产环境的写法，而不是「不支持就算了」。
+
+```jsx playground
+import { useEffect, useRef } from 'react';
+
+export default function App() {
+  const dialogRef = useRef(null);
+  const btnRef = useRef(null);
+
+  useEffect(() => {
+    // 原生支持 commandfor 时什么都不做；不支持时补 click
+    if ('commandForElement' in HTMLButtonElement.prototype) return;
+    const btn = btnRef.current;
+    const open = () => dialogRef.current?.showModal();
+    btn.addEventListener('click', open);
+    return () => btn.removeEventListener('click', open);
+  }, []);
+
+  return (
+    <div className="pg-inv">
+      <button
+        ref={btnRef}
+        className="pg-btn"
+        commandfor="pg-inv-dialog"
+        command="show-modal"
+      >
+        用 commandfor 打开
+      </button>
+
+      <dialog ref={dialogRef} id="pg-inv-dialog" className="pg-inv-dialog">
+        <h3>由按钮直接打开</h3>
+        <p>标记里只有 commandfor 和 command，没有一行 open() 逻辑。</p>
+        <form method="dialog">
+          <button className="pg-btn" type="button" commandfor="pg-inv-dialog" command="close">
+            关闭
+          </button>
+        </form>
+      </dialog>
+
+      <style>{`
+        .pg-inv { font: 14px/1.6 system-ui, sans-serif; }
+        .pg-btn { padding: 6px 14px; border-radius: 8px; border: 1px solid #c8ccd4; background: #fff; cursor: pointer; font: inherit; }
+        .pg-inv .pg-inv-dialog { border: 0; border-radius: 14px; padding: 22px 26px; box-shadow: 0 18px 50px rgb(0 0 0 / .22); max-inline-size: 320px; }
+        .pg-inv .pg-inv-dialog::backdrop { background: rgb(15 18 26 / .45); }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 2.3 场景三：悬停预览，移开即撤销（interest-triggered-tooltips）（interest-triggered-action-previews）
+
+**需求**：一排卡片，鼠标悬停（或键盘聚焦）时高亮预览，移开就恢复；再给一个「?」按钮解释某个字段。
+
+**老办法的问题**：`title` 属性只有原生 tooltip——要等约一秒、不能聚焦、样式不可控、触屏上完全不出现；自己写 `mouseenter` 又得处理「移开时正好移进提示框」的抖动、触屏长按、以及延迟多少毫秒才不闪。
+
+**方案**：`interestfor` 声明「谁对谁感兴趣」，浏览器统一把悬停、长按、聚焦归一成**兴趣**（interest）。提示内容放进 `popover="hint"`，触发器自动成为它的隐式锚点。
+
+```html
+<label>运费 <input name="shipping"></label>
+
+<!-- toggletip：悬停走 interestfor，点击走 popovertarget -->
+<button type="button" interestfor="shipping-help" popovertarget="shipping-help"
+        popovertargetaction="show" aria-label="关于运费的更多说明">?</button>
+
+<!-- 紧跟触发器之后，保证读屏顺序 -->
+<div id="shipping-help" popover="hint">满 50 元包邮，14:00 前下单当日发出。</div>
+```
+
+定位不需要 `anchor-name`：`interestfor` 已经让触发器成为隐式锚点，只写 `position-area` 就够。这段在演示「提示贴着触发器、上方放不下自动翻到下方」。
+
+```css
+[popover] {
+  position-area: block-start;              /* 相对隐式锚点：触发器上方 */
+  position-try-fallbacks: flip-block;      /* 溢出时上下翻转 */
+  margin: 0;                               /* 覆盖 UA 的居中定位 */
+}
+```
+
+**惰性提示与预览的区别**：tooltip 是对控件的短说明，用 `aria-describedby` 关联，**不要**加 `aria-expanded`，也不要把焦点移进去（违反 WCAG 3.2.1）；toggletip 是一个「?」按钮点击展开的较长说明，要 `aria-expanded` 与 `role="tooltip"`，并允许焦点进入。兴趣触发时还有三条硬约束（WCAG 1.4.13）：可消除（Esc）、可悬停（鼠标能移进提示）、持久（不会自己消失）。
+
+**动作预览**则用事件而不是浮层：一个兴趣源只能指向一个目标，但一个目标可以接多个兴趣源，用 `InterestEvent.source` 区分是谁触发的。
+
+```js
+// 悬停哪张「效果」按钮，就用哪个效果预览；移开即撤销
+card.addEventListener('interest', (e) => {
+  card.dataset.preview = e.source.dataset.effect;
+});
+card.addEventListener('loseinterest', () => {
+  delete card.dataset.preview;
+});
+```
+
+**对比**：
+
+| 维度 | ❌ 老写法：`title` / 手写 hover | ✅ 现代写法：`interestfor` |
+| --- | --- | --- |
+| 触发方式 | 只有鼠标，触屏与键盘缺席 | 悬停、长按、聚焦统一处理 |
+| 延迟 | 浏览器固定，不可调 | `interest-delay-start` / `interest-delay-end` 可调 |
+| 与浮层关系 | 无 | 自动成为锚点，自带 light dismiss |
+| 状态撤销 | 手写 `mouseleave` | 一组 `interest` / `loseinterest` 事件 |
+
+把预览做成按钮比做成浮层更稳：`interest` 与 `loseinterest` 各映射到一次状态切换即可。不支持 `interestfor` 的浏览器补 `mouseenter` / `focus` 两条等价触发，效果一致，只是少了浏览器对「移进提示再移出」的延迟处理。
+
+## 🔴 高阶：边界、性能与降级
+
+### 3.1 先查兼容线，再决定要不要写回退
+
+这一章的四个入口，兼容性并不齐步走。按「不支持时会发生什么」来记，比背版本号有用：
+
+| 特性 | Baseline | 不支持时 | 回退成本 |
+| --- | --- | --- | --- |
+| `dialog.showModal()` | Widely available | 只剩 `show()` 的显示效果，没有惰化 | 高，别自己造 |
+| `closedby` | 未进 Safari | 点遮罩不关，Esc 与按钮仍可用 | 低，一段坐标判断 |
+| Popover API | 2025-01 | 浮层不显示或没有 light dismiss | 中，条件加载 polyfill |
+| Invoker Commands | 2025-12 | 按钮点了没反应 | 低，click 兜底 |
+| Interest Invokers | 仅 Chromium | 悬停提示不出现 | 中，hover/focus 脚本 |
+| `@starting-style` | Widely available | 元素直接出现，无入场动画 | 低 |
+| `overlay` 属性 | 未进 Firefox | 退出动画不可见，关闭仍正常 | 低 |
+| `moveBefore()` | 未进 Safari | 移动后 iframe 重载、焦点丢失 | 中，手动重开 |
+| `hidden="until-found"` | Widely available | 内容一直不可见 | 低，移除属性 |
+
+统一的纪律是「特性检测 + 条件加载」，检测点选在原型上，而不是 `window` 上：
+
+```js
+// 只在缺能力时下载 polyfill，避免所有用户为少数浏览器付费
+if (!Object.hasOwn(HTMLElement.prototype, 'popover')) {
+  import('@oddbird/popover-polyfill');
+}
+if (!('commandForElement' in HTMLButtonElement.prototype)) {
+  import('invokers-polyfill');
+}
+```
+
+polyfill 有一个必须知道的副作用：它无法定义真正的 `:popover-open` 伪类，只能用类名模拟。因此样式必须把两套选择器写进同一条规则，否则不支持原生伪类的浏览器会把整条规则丢掉：
+
+```css
+/* 原生与 polyfill 两套打开态，用 :is() 合并且不提高特异性 */
+[popover]:is(:popover-open, .\:popover-open) {
+  display: block;
+}
+```
+
+另外，`invokers-polyfill` 只补开合行为，不会替你维护 `aria-expanded` 与 `aria-pressed`——需要这些状态的按钮要在 `command` 事件里手动同步。
+
+还有一类特性要主动压住：`html-streaming-setters`（乱序流式渲染）能让服务端乱序推送的 HTML 到达后就位，但它只在单一浏览器引擎实现，属于 volatile 特性，指南库默认锁定，需要显式运行 `npx modern-web-guidance@latest set-allow-volatile-features` 才读得到。生产环境继续用按序流式输出加占位骨架。
+
+### 3.2 挡得住点击，挡不住滚动（prevent-page-scroll-under-modal-dialog）
+
+**没它会怎样**：`showModal()` 已经让页面惰化，你以为万事大吉。但在触控板上把指针放在遮罩上滑动，下面的页面照滚；对话框内部滚到底后继续滑，页面会接着滚——用户关掉弹窗，发现自己已经不在原来的位置了。
+
+**老写法**是锁 `body`，还要补滚动条宽度，否则滚动条一消失整页会横移几像素：
+
+```js
+// ❌ 老办法：每次开合都要存旧值、算宽度、再还原
+const gap = window.innerWidth - document.documentElement.clientWidth;
+document.body.style.overflow = 'hidden';
+document.body.style.paddingRight = `${gap}px`;
+// 关闭时还要把两个值都恢复，漏一个就留下后遗症
+```
+
+**现代写法**是让滚动链在弹窗边界断掉。`overscroll-behavior: contain` 表示「滚到边界后不要把滚动传给祖先」，滚动条本身不动，布局也不跳：
+
+```css
+dialog:modal {
+  overscroll-behavior: contain;   /* 对话框内滚到底，不再带动页面 */
+}
+
+dialog::backdrop {
+  overflow: hidden;               /* backdrop 默认不是滚动容器 */
+  overscroll-behavior: contain;   /* 指针落在遮罩上滑动也不会传给页面 */
+}
+```
+
+注意 `::backdrop` 的两个细节：它默认 `overflow: visible`，而 `overscroll-behavior` 只在**滚动容器**上生效，所以必须先给它 `overflow: hidden`；`overflow: clip` 同样不建立滚动容器，别用。也不能用 `@supports` 检测 `overscroll-behavior`——所有现代浏览器都认识这个属性，即使在某些盒子上不生效。这是纯渐进增强：不支持时行为退化成 2.2 节之前的老样子，功能不受影响。
+
+**性能代价**：`overflow: hidden` 方案会在打开瞬间移除根滚动条，触发一次整页重排（reflow）；如果页面有 `position: sticky` 的侧栏或顶栏，还会一起失效。`overscroll-behavior` 只影响滚动链，不改变任何盒子尺寸，打开与关闭都零布局代价。
+
+**对比**：
+
+| 维度 | ❌ `body` 加 `overflow: hidden` | ✅ `overscroll-behavior` |
+| --- | --- | --- |
+| 布局跳动 | 滚动条消失，整页横移 | 无变化 |
+| `sticky` | 可能失效 | 不受影响 |
+| 滚动位置 | iOS 上可能被重置 | 保持 |
+| 代码 | 开时存值、关时还原 | 两条声明 |
+
+### 3.3 top layer 元素也要能动画进出（animate-to-from-top-layer）
+
+**没它会怎样**：给 `dialog` 写 `transition: opacity .3s`，打开时它直接出现、关闭时直接消失——因为 top layer 元素在 `display: none` 与可见态之间切换，而 `display` 默认是不可过渡的离散属性。
+
+**方案**是三件事配合：`allow-discrete` 允许 `display` 参与过渡；`overlay` 让元素在动画期间仍留在 top layer；`@starting-style` 定义入场起点。
+
+```css
+dialog, [popover] {
+  opacity: 0;
+  translate: 0 8px;
+  transition: opacity .25s, translate .25s, display .25s, overlay .25s;
+  transition-behavior: allow-discrete;  /* 独立声明，写进简写会被旧浏览器整条丢弃 */
+}
+
+dialog[open], [popover]:popover-open {
+  opacity: 1;
+  translate: 0 0;
+  @starting-style { opacity: 0; translate: 0 8px; }  /* 只用于入场 */
+}
+```
+
+**为什么需要 `overlay`**：`display` 一旦变成 `none`，元素立刻退出 top layer 并被裁剪，退出动画还没播完就消失了。`overlay` 只在过渡期间保持「浮在顶层」，必须写进 `transition-property` 才能等动画结束再退出。
+
+**性能与无障碍**：只过渡 `opacity` 与 `translate`，它们在合成器上完成，不触发布局；不要过渡 `block-size`、`box-shadow` 这类每帧都要重算的属性。缩放类动画必须包在 `@media (prefers-reduced-motion: no-preference)` 里。
+
+Firefox 能解析 `allow-discrete` 却不会真的过渡 `display`，所以退出动画需要脚本兜底：
+
+```js
+// 不支持 discrete 过渡时：先加属性播动画，动画结束再真正关闭
+dialog.dataset.closing = '';
+await Promise.all(dialog.getAnimations().map((a) => a.finished));
+delete dialog.dataset.closing;
+dialog.close();
+```
+
+### 3.4 移动 DOM 别把状态弄丢（persistent-top-layer-ui）（move-dom-element-without-losing-state）
+
+**没它会怎样**：把打开中的对话框从一个容器挪到另一个容器，`appendChild()` 走的是「先移除、再插入」，节点离开文档的一瞬间对话框被关闭；iframe 重新加载，动画从头播，输入框的焦点也丢了。
+
+**原因**：`appendChild()` / `insertBefore()` 没有「移动」语义，只有移除与插入两步，每一步都会触发对应的生命周期。
+
+**方案**：`moveBefore()` 做原子移动，绕过移除/插入。
+
+```js
+const wasOpen = panel.hasAttribute('open');
+
+if ('moveBefore' in Element.prototype) {
+  newParent.moveBefore(panel, null);    // 第二参数为 null 表示追加到末尾
+} else {
+  newParent.insertBefore(panel, null);  // 旧浏览器会关闭 top layer 元素
+  if (wasOpen) panel.showModal();       // 手动恢复，焦点要自己记
+}
+```
+
+自定义元素移动时不会触发 `connectedCallback` / `disconnectedCallback`，需要感知「被移动」就实现 `connectedMoveCallback()`。
+
+Safari 尚未支持 `moveBefore`，调用前必须检测；不支持时的「移动 + 重新打开」会丢焦点与滚动位置，需要自己记录再还原。无障碍上，移动尽量由用户操作触发，别让焦点掉到 `body`。
+
+### 3.5 隐藏不等于不可达（search-hidden-content）
+
+**没它会怎样**：用 `display: none` 折起 FAQ 或标签页内容，用户按 Ctrl+F 搜不到里面任何一句话；从搜索结果深链到某个段落，页面也不知道该展开哪一块。
+
+**方案**：能用 `<details>` 就用——它天然可被页内查找命中，`open` 是唯一状态源。自定义显隐 UI 则用 `hidden="until-found"`：浏览器在页内查找命中时自动移除该属性，并派发 `beforematch`，你只需在那里同步外围 UI。
+
+```html
+<section class="panel" hidden="until-found">……</section>
+<script>
+  // beforematch 会冒泡，可在容器上统一委托
+  container.addEventListener('beforematch', (e) => {
+    // 浏览器即将显示 e.target：同步按钮 aria-expanded、关闭其他面板
+  });
+</script>
+```
+
+三条约束：边框、内边距、背景加在子级包装元素上，别加在 `until-found` 元素本身；不要给它设 `display: none` / `visibility: hidden`（会永久破坏可搜索性）；不要拿它藏敏感信息。检测 `'onbeforematch' in HTMLElement.prototype`，不支持时直接移除 `hidden` 展开全部内容。
+
+### 3.6 给文字上色，别改 DOM（highlight-text-ranges）
+
+**没它会怎样**：搜索命中后往 `innerHTML` 里插 `<span>` 高亮，一插就把原有事件监听冲掉，输入框的光标也复位；清空时再来一遍，DOM 反复重建。
+
+**方案**：`Range` 描述位置，`Highlight` 描述分组，`::highlight()` 负责绘制。DOM 结构一个节点都不变。
+
+```js
+const ranges = [];
+const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+for (let node; (node = walker.nextNode()); ) {
+  let i = node.data.indexOf(keyword);
+  while (i !== -1) {
+    const range = new Range();
+    range.setStart(node, i);               // 必须基于文本节点，不是元素节点
+    range.setEnd(node, i + keyword.length);
+    ranges.push(range);
+    i = node.data.indexOf(keyword, i + keyword.length);
+  }
+}
+CSS.highlights.clear();                     // 先清空，避免残留过期区间
+CSS.highlights.set('search-results', new Highlight(...ranges));
+```
+
+```css
+::highlight(search-results) {
+  background-color: #0000ff;
+  color: white;
+}
+```
+
+限制：`::highlight()` 只认 `color`、`background-color`、`text-decoration`、`text-shadow` 等少数属性，`font-size`、`padding` 会被忽略；高亮不进无障碍树，纯属视觉。颜色要满足对比度，别只用颜色表达「错误」这类语义。没有 `CSS.highlights` 时退回 `<mark>`（用 `textContent` 赋值，避免 HTML 注入）。
+
+### 3.7 乱序流式渲染先别用（out-of-order-html-streaming）
+
+`out-of-order-html-streaming` 等 volatile 特性先别碰，等它进入 Baseline 再评估；本章四个入口（`dialog`、`popover`、`commandfor`、`interestfor`）已经覆盖了真实项目里绝大多数弹窗需求。
+
+## 📋 决策速查
+
+| 你想实现 | 用什么 | Baseline | 注意 |
+| --- | --- | --- | --- |
+| 打断式确认、表单、登录 | `dialog` + `showModal()` | Widely | 别用 `show()` 或 `open` 属性 |
+| 点遮罩关闭 | `closedby="any"` | 未进 Safari | 兜底判断点击坐标 |
+| 有未保存内容的弹窗 | `closedby="none"` + `cancel` 拦截 | 同上 | 询问逻辑放 `cancel`，清理放 `close` |
+| 菜单、Toast、提示浮层 | `popovertarget` + `popover` | 2025-01 | 不要与 `commandfor` 混写 |
+| 按钮开合、无需 JS | `commandfor` + `command` | 2025-12 | 表单内要写 `type="button"` |
+| 自定义业务动作 | `command="--xxx"` | 2025-12 | 事件不冒泡，手动同步 ARIA |
+| 悬停 / 聚焦提示 | `interestfor` + `popover="hint"` | 仅 Chromium | 焦点不要移入提示 |
+| 弹窗内滚动不带动页面 | `overscroll-behavior: contain` | Widely | `::backdrop` 要先 `overflow: hidden` |
+| 弹窗进出场动画 | `allow-discrete` + `overlay` + `@starting-style` | 部分支持 | 缩放动画尊重 `prefers-reduced-motion` |
+| 移动 DOM 保状态 | `moveBefore()` | 未进 Safari | 兜底是移动后重新打开 |
+| 折叠内容仍可被搜索 | `<details>` / `hidden="until-found"` | Widely | 样式写在子级包装上 |
+| 搜索结果高亮 | CSS Custom Highlight API | Widely | 只支持少数文本属性 |
+
+## ⚠️ 五个常见坑
+
+1. **给原生弹窗再补一遍语义**。`role="dialog"`、`aria-modal`、手动 `inert` 背景全都不要加；重复声明会把浏览器已经维护好的状态写乱。
+2. **用 `open` 属性打开模态**。`dialog.open = true` 只是显示，没有遮罩、没有惰化、没有焦点圈闭；模态只能走 `showModal()`。
+3. **`commandfor` 与 `popovertarget` 同时写**。同一对元素会触发两次开合，表现是「点了闪一下」或「关不掉」。
+4. **把焦点移进 tooltip**。惰性提示出现时抢焦点，键盘用户会突然失去当前位置（WCAG 3.2.1）；提示只读不抢。
+5. **`title` 当无障碍方案**。`title` 不可聚焦、触屏不可达、样式不可控；要提示就用 `interestfor` 或 `aria-describedby` 指向可见文本。
+
+## ✅ 自测三问
+
+1. 拔掉鼠标，只用 Tab / Enter / Esc，你能打开确认框、在内部循环焦点、关闭后回到原来那个按钮吗？
+2. 把 `closedby` 删掉、把 Invoker Commands 的 polyfill 关掉，你的弹窗还剩哪些可用路径？
+3. 在触控板上把指针放在遮罩上滑动，背后的页面会跟着滚吗？对话框内滚到底再继续滑呢？
+
+## 关键要点
+
+- **一个模态框只有五件事**：层级、焦点、Esc、滚动、语义。`<dialog>` + `showModal()` 全部内置，不要再手写。
+- **三种浮层各司其职**：`dialog` 管打断式模态，`popover` 管非模态菜单与 Toast，`popover="hint"` 管悬停提示。
+- **行为写进 HTML**：`popovertarget`、`commandfor`、`interestfor` 让交互在脚本执行前就可用，脚本只补浏览器覆盖不到的部分。
+- **关闭入口收敛到事件**：`cancel` 可以反悔、`close` 只做清理，`returnValue` 统一读结果并记得重置。
+- **每条新能力配一条回退**：`closedby` 补坐标判断、Invoker 补 click、`interestfor` 补 hover/focus、`moveBefore` 补手动重开。
+
+## 延伸阅读
+
+- [`<dialog>` 元素（MDN）](https://developer.mozilla.org/docs/Web/HTML/Element/dialog) ｜ [Popover API（MDN）](https://developer.mozilla.org/docs/Web/API/Popover_API)
+- [Invoker Commands API（MDN）](https://developer.mozilla.org/docs/Web/API/Invoker_Commands_API) ｜ [invokers-polyfill](https://github.com/keithamus/invokers-polyfill)
+- [Interest Invokers（MDN）](https://developer.mozilla.org/docs/Web/API/Interest_Invokers_API) ｜ [popover-polyfill](https://github.com/oddbird/popover-polyfill)
+- [CSS Custom Highlight API（MDN）](https://developer.mozilla.org/docs/Web/API/CSS_Custom_Highlight_API)
+- [HTML Sanitizer / 流式渲染现状（web.dev）](https://web.dev/)
+
+---
+
+← [返回前端总览](/web/) ｜ 下一章：[02 CSS 布局与响应式](/web/02-css-layout-responsive)

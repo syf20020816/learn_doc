@@ -1,0 +1,685 @@
+---
+title: 09 · Web Components
+description: 从「该不该写自定义元素」的判断，到四个生命周期、Shadow DOM 样式边界、::part 换肤、表单关联（FACE）与声明式 Shadow DOM 的 SSR——把跨框架组件做成平台能力。
+---
+
+# 第 9 章 Web Components
+
+> **难度**：🔴 高阶 ｜ **前置**：[01 HTML 与原生交互](/web/01-html-interactive)、[05 组件与 UX 模式](/web/05-components-ux) ｜ **学完你能**：写一个跨 React、Vue、原生页面复用，默认无障碍，还能直接进 `form` 的 `x-rating` 评分组件。
+
+**这一章要解决的毛病**
+
+- 同一个日期选择器要维护 React、Vue、营销页原生 JS 三份，改一次规则就得发三个包，版本还总对不齐。
+- 设计系统把圆角从 8px 改成 12px，三个仓库各改一遍，总有一个漏掉，线上就出现两种圆角。
+- 用 `div` 拼出来的「按钮」鼠标点得动，键盘 tab 不到，读屏也念不出它是什么。
+
+Web Components（Web 组件）不是一个框架，而是三件平台原语的合称：Custom Elements（自定义元素）、Shadow DOM（影子 DOM）、HTML template（模板）。它解决的不是「怎么写组件」，而是「组件怎么逃出框架」——浏览器认识它，所以谁都能用。
+
+三者分工很清晰：Custom Elements 给标签名绑一个类；Shadow DOM 给这个类一块样式与 DOM 的私有领地；template 让结构只解析一次、实例化无数次。记住这个分工，后面每一节都在给其中一件加细节。
+
+## 🟢 入门：先让它跑起来
+
+先记住一句话：**大多数组件不需要 Web Components**。它是平台级组件模型，代价是你得亲手处理生命周期与无障碍；只有组件必须「逃出框架」时才值得付这个代价。入门这一节先建立判断标准，再写第一个能跑的元素，最后理解它的样式边界。
+
+### 1.1 先判断：什么时候才该写自定义元素（web-components）
+
+**没它会怎样**：团队最常见的浪费，是把一个只会变色的按钮封装成 `my-button`，然后花两周补焦点、键盘、ARIA，做出来还是不如原生 `button` 好用——因为它把平台免费给的东西重新实现了一遍，还实现得更差。
+
+先看同一件事在三个生态里的写法，注意每段的「能运行范围」：
+
+```jsx
+// React：只在 React 运行时里成立，换到 Vue 项目要重写一份
+function SaveButton({ onSave }) {
+  return <button type="button" onClick={onSave}>保存</button>;
+}
+```
+
+```html
+<!-- Vue SFC：只在 Vue 运行时里成立，纯 HTML 营销页用不了 -->
+<template>
+  <button type="button" @click="$emit('save')">保存</button>
+</template>
+```
+
+```js
+// Web Component：定义一次，任何页面、任何框架都能当普通标签用
+class SaveButton extends HTMLElement {
+  connectedCallback() {
+    // 包的是真 button，键盘、焦点、读屏语义全部继承
+    this.innerHTML = '<button type="button">保存</button>';
+    this.querySelector('button').addEventListener('click', () => {
+      this.dispatchEvent(new CustomEvent('save', { bubbles: true }));
+    });
+  }
+}
+customElements.define('save-button', SaveButton);
+```
+
+**浏览器做了什么**：标签名里带连字符（kebab-case 命名）时，浏览器不会把它当未知元素丢掉，而是交给 Custom Elements 注册表。`define()` 之后，页面上所有同名元素由你的类接管，插入文档时调用 `connectedCallback`。连字符是它和现有及未来内置元素共存的约定——`button` 这个名字归平台，`save-button` 归你。
+
+**对比**——三种组件模型放在一起看，差别不在语法，而在「可运行范围」和「隔离方式」：
+
+| 维度 | React 组件 | Vue 组件 | Web Component |
+| :--- | :--- | :--- | :--- |
+| 运行前提 | React 运行时 | Vue 运行时 | 浏览器支持 Custom Elements 即可 |
+| 跨框架复用 | 不能，需重写 | 不能，需重写 | 可以，就是个原生标签 |
+| 样式隔离 | CSS Module / CSS-in-JS 约定 | scoped 属性选择器 | Shadow DOM 浏览器强制隔离 |
+| 传值方式 | props（任意类型） | props（任意类型） | attribute（字符串）+ property（任意类型） |
+| 无障碍语义 | 自己保证 | 自己保证 | 包原生控件可继承 |
+| 适合场景 | 应用内部页面 | 应用内部页面 | 设计系统、跨端嵌入、第三方挂件 |
+
+判断标准只有一条：**这个元素是否需要「自己的状态 + 可脚本化的 API + 原生标签表达不了的行为」，并且需要跨框架存活**。三条都满足才升级成自定义元素；否则用原生标签加 CSS——只为「换个样子」写自定义元素，等于白付一份生命周期与无障碍成本。
+
+### 1.2 第一个自定义元素：注册、属性与四个生命周期（custom-elements）
+
+**没它会怎样**：元素在页面上出现了，点它却没反应；或者从列表 A 拖到列表 B 后，一次点击触发两次——因为 `connectedCallback` 又跑了一遍，监听被绑了两遍。也有人写完后发现改属性没反应，因为他把 `observedAttributes` 在 `define()` 之后才追加。
+
+一个最小但完整、属性一改就重画的计数器：
+
+```js
+class CountBadge extends HTMLElement {
+  static observedAttributes = ['count'];   // define 时被快照，事后追加无效
+  connectedCallback() {
+    this.render();                          // 每次插入都会跑，必须幂等
+  }
+  disconnectedCallback() {
+    // 清理定时器、ResizeObserver、挂在 window 上的监听
+  }
+  attributeChangedCallback(name, oldValue, newValue) {
+    if (oldValue !== newValue) this.render();
+  }
+  adoptedCallback() {
+    // 元素被 adoptNode 搬到另一个 document（例如 iframe）时触发
+  }
+  get count() { return Number(this.getAttribute('count')) || 0; }
+  set count(v) { this.setAttribute('count', String(v)); }
+  render() { this.textContent = `共 ${this.count} 条`; }
+}
+customElements.define('count-badge', CountBadge);
+```
+
+**浏览器做了什么**：`define()` 会把类登记到标签名上，并把页面上已经存在的同名元素「升级」（upgrade 过程）——SSR 输出的 HTML 或晚加载的脚本就靠这一步接上。四个生命周期各有明确时机：
+
+| 回调 | 何时触发 | 常见误用 |
+| :--- | :--- | :--- |
+| `constructor` | 元素被创建（含 `createElement`） | 在这里读属性、加子节点 |
+| `connectedCallback` | 每次插入文档，移动元素也算一次 | 当成「只执行一次」的初始化 |
+| `disconnectedCallback` | 每次从文档移除 | 忘了在这里解绑监听 |
+| `attributeChangedCallback` | `observedAttributes` 里的属性变化 | 监听没声明的属性，永远不触发 |
+| `adoptedCallback` | 元素被搬到另一个 document | 基本用不到，不必刻意实现 |
+
+顺序也有讲究：`createElement` 只跑 `constructor`；插入文档才跑 `connectedCallback`；此时属性已经在 DOM 上，所以「读初始值」应该放在 connect 里，而不是构造器里。构造器里 `this.innerHTML` 也还不该写——有些引擎在解析过程中创建元素，此时子节点尚未就位。
+
+**对比**——为什么用 `observedAttributes` 而不是自己开一个 `MutationObserver`：
+
+| 维度 | 手写 `MutationObserver` | `observedAttributes` |
+| :--- | :--- | :--- |
+| 触发范围 | 任何属性变化都回调 | 只监听你声明的那几个 |
+| 初始值 | 要自己补读一次 | 升级时属性已在 DOM 上，connect 里直接读 |
+| 性能 | 每次变动都要比对全部 attribute | 只比对声明列表 |
+| 代码量 | 需要额外观察者与清理 | 一个静态字段 |
+
+#### 在线试一试：带属性的收藏按钮
+
+这段代码演示一个最小可用的自定义元素：状态、`aria-pressed` 和样式都关在 shadow root 里，外部只能通过 `::part(btn)` 改外观，通过 `favoritechange` 事件感知变化；同时用 property 而不是 attribute 改值，避免字符串来回转换。
+
+```jsx playground
+import { useEffect, useRef, useState } from 'react';
+
+class PgFav extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host { display: inline-block; }
+        button {
+          font: inherit; color: inherit; cursor: pointer;
+          padding: 6px 14px; border-radius: 999px;
+          border: 1px solid #c8ccd4; background: #fff;
+        }
+        button[aria-pressed="true"] { border-color: #e0a640; background: #fff6e6; }
+      </style>
+      <button type="button" part="btn" aria-pressed="false">☆ 收藏</button>
+    `;
+    const btn = this.shadowRoot.querySelector('button');
+    btn.addEventListener('click', () => {
+      const on = btn.getAttribute('aria-pressed') === 'true';
+      btn.setAttribute('aria-pressed', String(!on));
+      btn.textContent = on ? '☆ 收藏' : '★ 已收藏';
+      this.dispatchEvent(new CustomEvent('favoritechange', {
+        detail: { favorite: !on },
+        bubbles: true,
+      }));
+    });
+  }
+}
+
+if (!customElements.get('pg-fav')) customElements.define('pg-fav', PgFav);
+
+export default function App() {
+  const hostRef = useRef(null);
+  const [log, setLog] = useState('还没操作');
+  useEffect(() => {
+    const host = hostRef.current;
+    const onFav = (e) => setLog(e.detail.favorite ? '页面收到：已收藏' : '页面收到：取消收藏');
+    host.addEventListener('favoritechange', onFav);
+    return () => host.removeEventListener('favoritechange', onFav);
+  }, []);
+  return (
+    <div className="pg-wc" ref={hostRef}>
+      <pg-fav />
+      <p className="pg-wc__log">{log}</p>
+      <p className="pg-wc__tip">按钮在 shadow root 内，外部样式只能通过 <code>::part(btn)</code> 指定。</p>
+      <style>{`
+        .pg-wc { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 6px; }
+        .pg-wc pg-fav::part(btn) { font-weight: 600; letter-spacing: .02em; }
+        .pg-wc__log { margin: 0; color: #2f9e6b; font-weight: 600; }
+        .pg-wc__tip { margin: 0; color: #5b6473; font-size: 13px; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+注意事件必须靠 `addEventListener` 手动监听，而且 `CustomEvent` 要设 `bubbles: true` 才能穿过 shadow 边界冒到宿主外层；事件名也必须全小写——HTML 属性名不区分大小写，`favoriteChange` 这种驼峰名在模板里写不出来。
+
+### 1.3 Shadow DOM：样式边界、`::part`、`::slotted`（shadow-dom）
+
+**没它会怎样**：组件内部的 `.title { color: red }` 漏到页面上，把别人的标题也染红；反过来，页面一条全局的 `button { width: 100% }` 把组件里的按钮撑变形。两边都在改，谁也不知道是谁改坏的。
+
+模板定义一次，每个实例深克隆一份：
+
+```js
+const template = document.createElement('template');
+template.innerHTML = `
+  <style>
+    :host { display: block; }
+    .box { border: 1px solid #dfe3ea; border-radius: 12px; padding: 12px; }
+  </style>
+  <div class="box">
+    <h3><slot name="title">未命名</slot></h3>
+    <slot></slot>
+  </div>`;
+
+class InfoCard extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this.shadowRoot.append(template.content.cloneNode(true)); // 克隆已解析片段
+  }
+}
+customElements.define('info-card', InfoCard);
+```
+
+**浏览器做了什么**：`attachShadow` 在宿主下面挂一棵独立的 DOM 子树，内部样式只作用于这棵树，外部选择器进不来（可继承属性除外，比如 `color`、`font`、自定义属性）。`slot` 是「洞口」：写在宿主标签里的子节点仍属于页面（Light DOM），只是被投影到 shadow 树中显示，因此保留页面给的样式与语义。
+
+样式跨界只有三条受控通道：
+
+```css
+/* 1. 自定义属性：可继承，天然穿透，适合主题 */
+my-card { --card-bg: #1b2230; }
+/* 组件内部：background: var(--card-bg, #fff); */
+
+/* 2. ::part：点名暴露的内部节点，适合单点微调 */
+my-card::part(title) { letter-spacing: .02em; }
+
+/* 3. ::slotted：管投进洞口的 Light DOM，只能选顶层节点 */
+::slotted(h3) { margin: 0; }
+```
+
+**对比**——BEM 命名约定和 Shadow DOM 边界的真实差别：
+
+| 维度 | BEM 加全局 CSS | Shadow DOM |
+| :--- | :--- | :--- |
+| 样式隔离 | 靠命名约定，仍会冲突 | 浏览器强制隔离 |
+| 覆盖内部样式 | 直接写选择器，谁都能改 | 只能走 `::part` 或自定义属性 |
+| 全局主题 | 天然生效 | 必须显式开通道 |
+| 选择器性能 | 全局匹配，类名越多越慢 | 每棵子树内匹配 |
+| 调试成本 | 低 | 多一层 shadow root，要看对面板 |
+
+`::slotted` 有个容易踩的边界：它只能选中投影进来的**顶层**节点，`::slotted(h3 span)` 是无效的；想改更深层，要么让消费者自己给类名，要么在组件内部包一层再暴露 `part`。
+
+## 🟡 进阶：真实工程里的组合用法
+
+入门解决「能跑起来」，进阶解决「三个框架共用一份代码还不打架」。两个场景：主题化的卡片（样式通道）、能进表单的评分控件（表单与无障碍）。它们的共同点是——都在回答「边界画在哪里」。
+
+### 2.1 场景一：一套卡片，三个框架共用（styling-web-components）
+
+**需求**：设计系统要同时供 React 后台、Vue 活动页、纯 HTML 营销页使用；换主题时不能改组件源码，也不能要求三个团队同时发版。
+
+**方案**：结构封在 shadow 里；主题走 CSS 自定义属性（自定义属性可继承，天然穿透边界）；需要给特定内部节点开样式口子时用 `::part`；运行时状态用 `:state()`。
+
+先看组件内部的取色方式——只写回退值，不写死颜色。`--_bg` 带下划线前缀是社区约定，表示「私有变量，别在外面改」：
+
+```css
+/* 组件内部：公开变量没被设置时用回退值 */
+:host {
+  --_bg: var(--card-bg, #ffffff);
+  --_fg: var(--card-fg, #1c2330);
+}
+.card {
+  background: var(--_bg);
+  color: var(--_fg);
+}
+```
+
+消费者只改变量、不碰结构，需要时再点对点开 `part`：
+
+```css
+/* 消费者：换主题只改变量，一行覆盖三个框架 */
+pg-card { --card-bg: #1b2230; --card-fg: #eef2f8; }
+
+/* 只对暴露出来的标题做微调，不碰内部其它节点 */
+pg-card::part(title) { letter-spacing: .02em; }
+```
+
+这段 demo 演示「变量换肤 + `::part` 微调」两条通道一起用：切换深色时只改外层类名上的 CSS 变量，组件内部结构完全不动。
+
+```jsx playground
+import { useState } from 'react';
+
+class PgCard extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host { display: block; }
+        .card {
+          border: 1px solid var(--pg-card-line, #dfe3ea);
+          border-radius: 14px;
+          padding: 16px;
+          background: var(--pg-card-bg, #fff);
+          color: var(--pg-card-fg, #1c2330);
+        }
+        h3 { margin: 0 0 6px; font-size: 16px; }
+        p { margin: 0; font-size: 13px; color: var(--pg-card-muted, #5b6473); }
+      </style>
+      <div class="card">
+        <h3 part="title">会员专享</h3>
+        <p part="body">每周更新的现代 Web 实践。</p>
+      </div>
+    `;
+  }
+}
+if (!customElements.get('pg-card')) customElements.define('pg-card', PgCard);
+
+export default function App() {
+  const [dark, setDark] = useState(false);
+  return (
+    <div className={dark ? 'pg-theme pg-theme--dark' : 'pg-theme'}>
+      <button type="button" className="pg-theme__toggle" onClick={() => setDark(!dark)}>
+        切换到{dark ? '浅色' : '深色'}
+      </button>
+      <pg-card />
+      <style>{`
+        .pg-theme { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 12px; }
+        .pg-theme pg-card {
+          --pg-card-bg: #ffffff;
+          --pg-card-fg: #1c2330;
+        }
+        .pg-theme--dark pg-card {
+          --pg-card-bg: #1b2230;
+          --pg-card-fg: #eef2f8;
+          --pg-card-line: #33405a;
+          --pg-card-muted: #a9b4c6;
+        }
+        .pg-theme pg-card::part(title) { letter-spacing: .02em; }
+        .pg-theme__toggle {
+          justify-self: start; font: inherit; cursor: pointer;
+          padding: 6px 14px; border-radius: 999px;
+          border: 1px solid #c8ccd4; background: #fff;
+        }
+      `}</style>
+    </div>
+  );
+}
+```
+
+**对比**——「每个框架各写一份」和「一份自定义元素」在长期维护上的差别：
+
+| 维度 | 每个框架各写一份 | 自定义元素 + 变量 / `::part` |
+| :--- | :--- | :--- |
+| 换主题 | 三个仓库改三遍，还要协调发版 | 改一行 CSS 变量 |
+| 结构一致性 | 靠人盯 review | 浏览器保证同一份 DOM |
+| 样式越界 | 全局类名互相污染 | 默认隔离，开口子要显式声明 |
+| 消费者自由度 | 想改哪改哪，容易改坏 | 只能动变量与暴露的 part |
+| 首屏成本 | 无 | 多一次脚本下载与升级 |
+
+最后一行是必须承认的代价：Shadow DOM 隔离得越干净，消费者能做的事就越少。设计得很细的 `part` 名（`title`、`body`、`footer`）比暴露一堆内部类名更有用。
+
+### 2.2 场景二：能进表单的评分控件（accessible-web-components）（form-associated-custom-elements）
+
+**需求**：评分控件要放进真实 `form`：必填校验、`FormData` 直接拿到值、表单 reset 后清空，键盘也能操作，读屏能念出「3 星，共 5 星」。
+
+**方案**：`static formAssociated = true` 打开表单关联（FACE，Form-Associated Custom Elements），用 `setFormValue` 提交通道、`setValidity` 接入原生校验；默认语义用 `ElementInternals` 设，而不是往宿主上写一堆 ARIA。
+
+```js
+class RatingInput extends HTMLElement {
+  static formAssociated = true;              // 少了这行，表单 API 全部不可用
+  constructor() {
+    super();
+    this._internals = this.attachInternals();
+    this._value = 0;
+    this._internals.role = 'radiogroup';     // 默认语义，消费者仍可覆盖
+    this._internals.ariaLabel = '评分';
+  }
+  set value(v) {
+    this._value = v;
+    this._internals.setFormValue(String(v)); // 提交通道，不需要隐藏 input
+    const invalid = this.hasAttribute('required') && v === 0;
+    this._internals.setValidity(
+      invalid ? { valueMissing: true } : {},
+      invalid ? '请先评分' : '',
+      this.shadowRoot.querySelector('button')  // 报错时聚焦的锚点
+    );
+  }
+  formResetCallback() { this.value = 0; }     // 表单 reset 时平台回调
+  formStateRestoreCallback(state) { this.value = Number(state) || 0; }
+  formDisabledCallback(disabled) { this.toggleAttribute('disabled', disabled); }
+}
+```
+
+`ElementInternals` 还能设默认语义，这样消费者不必自己写 ARIA。跨 shadow 边界做标签关联时，`ariaLabelledByElements` 比 `aria-labelledby` 的 id 字符串更可靠——id 在 shadow 树内外不共享，字符串引用经常指空；老引擎没有这个属性时，退回同树内可解析的字符串 id。
+
+这段 demo 演示完整的 FACE 闭环：打星即写 `FormData`、不评分提交会被浏览器拦下并聚焦锚点、点重置会走 `formResetCallback`。
+
+```jsx playground
+import { useEffect, useRef, useState } from 'react';
+
+class PgRating extends HTMLElement {
+  static formAssociated = true;
+  constructor() {
+    super();
+    this._internals = this.attachInternals();
+    this._value = 0;
+    this.attachShadow({ mode: 'open' });
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host { display: inline-flex; gap: 2px; }
+        :host(:invalid) { outline: 1px dashed #d9534f; border-radius: 6px; }
+        button {
+          font-size: 22px; line-height: 1; padding: 2px 3px;
+          background: none; border: 0; cursor: pointer; color: #c8ccd4;
+        }
+        button[aria-pressed="true"] { color: #e0a640; }
+      </style>
+      ${[1, 2, 3, 4, 5].map((n) => `<button type="button" aria-label="${n} 星">★</button>`).join('')}
+    `;
+    this.shadowRoot.querySelectorAll('button').forEach((btn, i) => {
+      btn.addEventListener('click', () => { this.value = i + 1; });
+    });
+  }
+  connectedCallback() {
+    if (!this.hasAttribute('required') || this._value > 0) return;
+    this._internals.setValidity({ valueMissing: true }, '请先评分', this.shadowRoot.querySelector('button'));
+  }
+  get value() { return this._value; }
+  set value(v) {
+    this._value = v;
+    this._internals.setFormValue(String(v));
+    const anchor = this.shadowRoot.querySelector('button');
+    this._internals.setValidity(v > 0 ? {} : { valueMissing: true }, v > 0 ? '' : '请先评分', anchor);
+    this.shadowRoot.querySelectorAll('button').forEach((btn, i) => {
+      btn.setAttribute('aria-pressed', String(i < v));
+    });
+  }
+  formResetCallback() { this.value = 0; }
+}
+if (!customElements.get('pg-rating')) customElements.define('pg-rating', PgRating);
+
+export default function App() {
+  const formRef = useRef(null);
+  const [out, setOut] = useState('点提交看看 FormData 里有没有 rating');
+  useEffect(() => {
+    const form = formRef.current;
+    const onSubmit = (e) => {
+      e.preventDefault();
+      const data = new FormData(form);
+      setOut('FormData rating = ' + String(data.get('rating')));
+    };
+    const onReset = () => setOut('已重置，rating 归零');
+    form.addEventListener('submit', onSubmit);
+    form.addEventListener('reset', onReset);
+    return () => {
+      form.removeEventListener('submit', onSubmit);
+      form.removeEventListener('reset', onReset);
+    };
+  }, []);
+  return (
+    <form ref={formRef} className="pg-face">
+      <p className="pg-face__tip">必填：不评分直接提交，浏览器会拦下并聚焦锚点。</p>
+      <pg-rating name="rating" required="true" />
+      <div className="pg-face__row">
+        <button type="submit">提交</button>
+        <button type="reset">重置</button>
+      </div>
+      <output className="pg-face__out">{out}</output>
+      <style>{`
+        .pg-face { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 10px; }
+        .pg-face__tip { margin: 0; color: #5b6473; }
+        .pg-face__row { display: flex; gap: 8px; }
+        .pg-face__row button {
+          font: inherit; cursor: pointer; padding: 6px 16px;
+          border-radius: 8px; border: 1px solid #c8ccd4; background: #fff;
+        }
+        .pg-face__out { color: #2f9e6b; font-weight: 600; }
+      `}</style>
+    </form>
+  );
+}
+```
+
+**对比**——「隐藏 input 中转」和 FACE 的差别，本质是「假装成表单控件」还是「真的成为表单控件」：
+
+| 维度 | 隐藏 `input` 中转 | FACE（表单关联） |
+| :--- | :--- | :--- |
+| 提交值 | 手动同步字符串到隐藏框 | `setFormValue` 直接进 `FormData` |
+| 原生校验 | 无法参与，只能自己写提示 | `setValidity` 接入 `:invalid` 与提交拦截 |
+| reset / disabled | 手动监听表单事件 | 平台回调 `formResetCallback` 等 |
+| 读屏语义 | 隐藏框通常被忽略 | `ElementInternals` 直接反射到无障碍树 |
+| 代码量 | 控件越多越乱 | 一个 `internals` 管到底 |
+
+无障碍上还有一条容易忽略的规则：键盘交互不能用「只有鼠标能触发」的监听。评分控件是单选组语义，方向键应当能在星之间移动，`aria-pressed` 只是视觉状态的补充，真正被读屏读的是 `radiogroup` 与每颗星的 `radio` 角色。
+
+## 🔴 高阶：边界、SSR、降级
+
+到这里能写能用了，剩下的是「别人家的浏览器」和「一万个实例」。高阶只回答三个问题：哪些能力有版本差、SSR 首屏怎么不闪、坏掉时怎么优雅退化。判断「要不要现在用」的方法很简单：先写特性检测，再决定走增强还是走老路，而不是按 UA 猜。
+
+### 3.1 边界：哪些能力有版本差、不支持时怎么办
+
+| 特性 | 最低版本（Baseline） | 不支持时怎么办 |
+| :--- | :--- | :--- |
+| Custom Elements v1 | 2018 起 Widely | 内容按普通 HTML 显示，行为增强失效 |
+| Shadow DOM v1 | 2018 起 Widely | 退化为 Light DOM，靠 BEM 隔离 |
+| `::part` / `::slotted` | 2020-07 | 不给样式口子，改用自定义属性 |
+| `adoptedStyleSheets` | 2023-03 | 每实例塞 `style` 元素，接受重复解析 |
+| FACE 表单关联 | 2023-03 | 视觉隐藏的原生 `input` 同步值 |
+| ElementInternals ARIA 反射 | 2023-10 | 退回 `setAttribute('role', ...)` |
+| `:state()` | 2024 年起 Widely | 改成 attribute 加 `:host([busy])` |
+| 声明式 Shadow DOM | 2024-02 | 客户端 `attachShadow` 补挂，接受一闪 |
+| `ariaLabelledByElements` | 2025-04 | 同树内用 id 引用，跨边界用 `aria-label` |
+| `moveBefore` | 2025 年起 | 先移除再插入，手动保存状态 |
+
+检测要写「能力」而不是「浏览器名字」。下面这段判断组件该走增强分支还是基础分支：
+
+```js
+// 一次性算出本地能力表，组件内部只读结果
+const support = {
+  // 自定义元素本身：不支持时整段脚本直接跳过，页面保持静态 HTML
+  ce: 'customElements' in window,
+  // 声明式 Shadow DOM：靠 prototype 上有没有 shadowRootMode 判断，不要解析 HTML 猜
+  dsd: Object.hasOwn(HTMLTemplateElement.prototype, 'shadowRootMode'),
+  // constructed stylesheet：能 new 出来才算，旧实现会有对象但无法 adopt
+  sheets: (() => {
+    try { new CSSStyleSheet().replaceSync(':host{}'); return 'adoptedStyleSheets' in ShadowRoot.prototype; }
+    catch { return false; }
+  })(),
+  // 表单关联：只能靠实例探测，类本身在旧引擎里不存在
+  face: (() => {
+    try { return !!HTMLElement.prototype.attachInternals; } catch { return false; }
+  })(),
+};
+```
+
+**对比**——「按 UA 猜」和「按能力探测」在真实项目里的后果：
+
+| 维度 | 按 UA / 版本号猜 | 按能力探测 |
+| :--- | :--- | :--- |
+| 准确性 | 浏览器改名、套壳、企业策略就失效 | 直接问 API 在不在 |
+| 维护成本 | 每个新版本都要补一行规则 | 不用维护 |
+| 降级粒度 | 整页降级 | 单个特性降级 |
+| 误判后果 | 该降级的没降级，直接报错白屏 | 最多走回退分支 |
+
+降级不是「把功能关掉」，而是「给一个仍可用的替代」。同一个异步按钮，两种写法：
+
+```js
+// ❌ 直接假设 states 存在：老引擎里 undefined.add 立刻抛错，整个模块挂掉
+this._internals.states.add('busy');
+
+// ✅ 有就用，没有就落到 attribute，样式两种选择器都写
+const states = this._internals?.states;
+if (states) states.add('busy');
+else this.setAttribute('busy', '');
+```
+
+### 3.2 SSR 与水合：DSD、FOUC 与「别重渲染」（prerendering-custom-elements）
+
+第一个坑是「未升级元素闪现」（FOUC）。脚本还没到时元素是空的，脚本一到内容突然出现，页面抖一下。用 `:not(:defined)` 隐藏，但必须 fail open——脚本失败时内容最终要能看见：
+
+```css
+my-card:not(:defined) {
+  visibility: hidden;
+  /* 2 秒后无条件显示：慢脚本、报错脚本都不会永久藏内容 */
+  animation: reveal .2s 2s forwards;
+}
+@keyframes reveal { to { visibility: visible; } }
+```
+
+用 `visibility` 而不是只写 `opacity: 0`，因为前者同时把内容移出 tab 序与无障碍树（后者会留下「看不见却能聚焦」的坑）。守卫只套在需要它的元素上，别全局套在 `body` 上。
+
+第二个坑是服务端渲染。声明式 Shadow DOM（Declarative Shadow DOM，DSD）让解析器仅凭 HTML 就挂上 shadow root，JS 没到也能看到带样式的结构：
+
+```html
+<my-card>
+  <template shadowrootmode="open">
+    <style>.card { border: 1px solid #dfe3ea; border-radius: 8px; padding: 1rem; }</style>
+    <div class="card"><slot></slot></div>
+  </template>
+  <p>JS 加载前就可见、已带样式。</p>
+</my-card>
+```
+
+**对比**——命令式挂根与声明式 Shadow DOM，差别直接体现在首屏和水合上：
+
+| 维度 | 客户端 `attachShadow` | 声明式 Shadow DOM |
+| :--- | :--- | :--- |
+| 首屏 | 脚本执行后才出现内容 | 解析 HTML 即带样式可见 |
+| 样式 | 另发文件或内联到脚本 | 随模板一起到达 |
+| 水合 | 要判断根是否已存在 | 直接复用，无需重建 |
+| 兼容性 | Widely | 2024-02 起 Widely |
+
+水合（英文 hydration）时最忌讳重渲染——shadow root 已经存在，直接复用并只挂行为：
+
+```js
+class MyCard extends HTMLElement {
+  constructor() {
+    super();
+    if (!this.shadowRoot) {                 // 复用 SSR 的根，缺失才补
+      this.attachShadow({ mode: 'open' });
+      this.shadowRoot.append(template.content.cloneNode(true));
+    }
+    // 只挂一次监听，不重建服务端 DOM，避免闪烁
+    this.shadowRoot.querySelector('.toggle')
+      ?.addEventListener('click', () => this.toggleAttribute('open'));
+  }
+}
+```
+
+不解析 `shadowrootmode` 的老引擎里，模板是惰性的：检测 `Object.hasOwn(HTMLTemplateElement.prototype, 'shadowRootMode')`，缺失就手动把 `template.content` 搬进 `attachShadow` 建出的根，并移除残留模板，组件仍能渲染，只是首屏要多等一次脚本。
+
+一句话总结高阶：**SSR 负责「先看见」，JS 负责「能交互」，两者之间只允许挂事件，不允许重建 DOM**。重建一次，用户就会看到一次白闪。
+
+## 📋 决策速查
+
+| 你想实现 | 用什么 | Baseline | 注意 |
+| :--- | :--- | :--- | :--- |
+| 只改外观，不改行为 | 原生元素 + CSS | Widely | 别为了样式写自定义元素 |
+| 组件要跨 React / Vue 复用 | Custom Elements | 2018 | 包装真控件，别重造语义 |
+| 内部样式不外泄 | Shadow DOM | 2018 | 全局主题要走变量 |
+| 消费者只改颜色 | CSS 自定义属性 | Widely | 组件内只写回退值 |
+| 消费者改某个内部节点 | `::part` + `exportparts` | 2020-07 | 只暴露少量高层 part |
+| 改投进洞口的子节点 | `::slotted` | 2020-07 | 只能选顶层节点 |
+| 控件要进 `form` 提交 | FACE 表单关联 | 2023-03 | 必须加 `static formAssociated` |
+| 必须参与原生校验 | `setValidity` + 锚点 | 2023-03 | 清除时传空对象 `setValidity({})` |
+| 首屏就要有样式 | 声明式 Shadow DOM | 2024-02 | 样式必须随模板走 |
+| 未升级时避免闪现 | `:not(:defined)` | Widely | 必须 fail open |
+
+## ⚠️ 五个常见坑
+
+1. **构造器里读属性、加子节点**。构造器执行时属性可能还没解析完，子节点也可能没到位；需要读取初始状态就放到 `connectedCallback`。
+2. **把 `connectedCallback` 当初始化用一次**。移动元素会再次触发，事件监听会绑两遍：
+
+```js
+// ❌ 每次插入都 add 一次，移动后点击触发两次
+connectedCallback() {
+  this.addEventListener('click', this.onClick);
+}
+
+// ✅ 绑定与解绑成对，或者在构造器里只绑一次
+connectedCallback() {
+  this.addEventListener('click', this.onClick);
+}
+disconnectedCallback() {
+  this.removeEventListener('click', this.onClick);
+}
+```
+
+3. **事后改 `observedAttributes`**。它在 `define()` 时被快照，之后再往类上追加属性名不会生效，必须在注册前定好。
+4. **`:not(:defined)` 永久隐藏**。只写 `visibility: hidden` 不加延时兜底，脚本 404 时整块内容就消失了，必须 fail open。
+5. **用 `closed` 模式或 `div` 重造控件**。`closed` 会让页面脚本、测试与无障碍工具都进不去；重造 `button` 则要自己补键盘与语义，通常得不偿失。
+
+## ✅ 自测三问
+
+**一问**：把 `count-badge` 从列表 A 拖到列表 B，点击为什么触发两次？
+
+答：移动元素会先断开再插入，`connectedCallback` 又跑了一遍，而监听没有在 `disconnectedCallback` 里解绑。修复是绑定与解绑成对，或把监听放在构造器里只执行一次。
+
+**二问**：消费者想改卡片标题的字重，又不许改组件源码，有哪两条路？
+
+答：内部给标题加 `part="title"`，消费者用 `my-card::part(title)`；或者组件暴露一个自定义属性，在 shadow 内部用 `var()` 读取。前者适合单点微调，后者适合主题体系。
+
+**三问**：下面这段表单代码，提交时为什么拿不到值？
+
+```js
+class MyRating extends HTMLElement {   // 少了 static formAssociated = true
+  constructor() {
+    super();
+    this._internals = this.attachInternals();
+  }
+  set value(v) { this._internals.setFormValue(v); }
+}
+```
+
+答：没有声明 `static formAssociated = true`，元素不会参与表单，`FormData` 里也就没有它的名字；`name` 属性同样不能少。
+
+## 关键要点
+
+1. 判据是「封装状态 / 可脚本化 API / 原生表达不了的行为」，不是「长得不一样」；需要包装时包真 `button`，别重造语义。
+2. 四个生命周期各有边界：`connectedCallback` 会多次触发、`disconnectedCallback` 要成对清理、`observedAttributes` 在 `define()` 时快照、`adoptedCallback` 几乎用不到。
+3. 样式跨界只有三条受控通道：可继承的自定义属性（主题主通道）、`::part`（单点样式）、`:state()`（运行时状态，只读）。
+4. 表单控件用 FACE（`formAssociated` + `setFormValue` / `setValidity`），不要再塞隐藏 `input`；语义默认值走 `ElementInternals`。
+5. SSR 用 DSD：样式随模板走、水合不重渲染、`:not(:defined)` 要 fail open。
+
+## 延伸阅读
+
+- [MDN：Web Components](https://developer.mozilla.org/zh-CN/docs/Web/API/Web_components) —— 三件套总入口
+- [MDN：使用 shadow DOM](https://developer.mozilla.org/zh-CN/docs/Web/API/Web_components/Using_shadow_DOM) —— `attachShadow`、模板与插槽
+- [MDN：ElementInternals](https://developer.mozilla.org/zh-CN/docs/Web/API/ElementInternals) —— ARIA、custom states 与表单关联
+- [MDN：CustomElementRegistry](https://developer.mozilla.org/zh-CN/docs/Web/API/CustomElementRegistry) —— `define` 与升级语义
+- [WCAG 2.2 · 4.1.2 Name, Role, Value](https://www.w3.org/TR/WCAG22/#name-role-value) —— 无障碍红线
+
+---
+
+← 上一章：[08 安全与隐私](/web/08-security-privacy) ｜ 下一章：[10 JS 平台能力与内置 AI](/web/10-js-platform-ai)

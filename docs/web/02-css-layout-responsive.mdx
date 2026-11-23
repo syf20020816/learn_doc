@@ -1,0 +1,650 @@
+---
+title: 02 · CSS 布局与响应式
+description: 从布局选型与容器单位，到容器查询、:has()、锚点定位与内在尺寸——让组件自己决定长什么样。
+---
+
+# 第 2 章 CSS 布局与响应式
+
+> **难度**：🟢 入门 ｜ **前置**：[第 1 章 HTML 与原生交互](/web/01-html-interactive) ｜ **学完你能**：不写一行测量脚本，让同一个组件在侧栏竖排、在主区横排，并让下拉框自己找位置。
+
+**这一章要解决的毛病**
+
+- 同一个卡片组件，放进 280px 侧栏就溢出、放进 720px 主区又显得空，只好复制一份改类名。
+- 顶部导航在桌面端正常，在手机上被地址栏收起时留出一条白边，或者按钮被 `100vh` 顶出屏幕。
+- 下拉菜单永远朝下弹，靠近视口底部时被裁掉；为了翻转，引入了 40KB 的定位库和一堆 `resize` 监听。
+
+这些问题的共同点是：**样式在「猜」环境**。媒体查询只能看见视口，看不见组件所在的那一格；`vh` 不知道地址栏会伸缩；绝对定位不知道自己和视口边缘还有多远。现代 CSS 把环境信息直接交给样式：容器查询看容器、`dvh` 看可视视口、锚点定位看锚点。这一章沿着「单位与布局 → 容器查询 → 级联与支持检测 → 锚点定位 → 内在尺寸」一路往上。
+
+## 🟢 入门：先让它跑起来
+
+### 1.1 先选对布局引擎（css-layout）
+
+**没它会怎样**：用 `float` 或绝对定位拼三栏，窗口一窄就互相重叠；用 `flex` 撑满一行时，只要有一个长 URL，整行就被顶出容器——因为 flex 子项的 `min-width` 默认是 `auto`，内容不肯收缩。
+
+**最小例子**：一个会自动换列、永远不会溢出容器的卡片墙。这段在演示 `grid` 的自动填充与 `min()` 的配合。
+
+```html
+<ul class="cards">
+  <li class="card">…</li>
+  <li class="card">…</li>
+</ul>
+```
+
+```css
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 16px;
+}
+.card { min-inline-size: 0; }   /* 允许子项收缩到内容最小宽度以下 */
+```
+
+**浏览器做了什么**：`auto-fit` 先按容器宽度算出能放几列，再把剩余空间平分给 `1fr`；`minmax()` 的下限用 `min(220px, 100%)`，保证容器窄于 220px 时轨道跟着缩，而不是撑破。`grid` 的尺寸解析分两轮：先定轨道，再排子项，所以不需要脚本测量。
+
+**对比**：
+
+| 维度 | 老写法：`float` / 绝对定位 | 现代写法：`grid` / `flex` |
+| --- | --- | --- |
+| 高度对齐 | 手动算高度或靠 `clearfix` | 同一行自动等高 |
+| 换行 | 手动清浮动、断点 | `auto-fit` / `flex-wrap` |
+| 溢出 | 靠 `overflow: hidden` 硬切 | `minmax()` 与 `min-width: 0` 主动收缩 |
+| 间距 | `margin` 叠加，首尾要特殊处理 | `gap` 只出现在项之间 |
+
+选型口诀：**一维排列用 flex，二维网格用 grid，文字流用普通流**。flex 里最常见的坑是忘了 `min-inline-size: 0`：
+
+```css
+.toolbar { display: flex; gap: 8px; }
+.toolbar .title {
+  flex: 1;
+  min-inline-size: 0;   /* 不加：长单词 / 长链接会把整行撑破 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+```
+
+### 1.2 三个单位顶替一半 JS（responsive-design）
+
+**没它会怎样**：为了「首屏铺满且不被地址栏挡住」，在 `resize` 里量 `innerHeight` 写 CSS 变量；为了图片不跳版，用 `padding-top: 56.25%` 撑比例；为了标题在手机和桌面上都好看，写三档媒体查询改 `font-size`。
+
+**最小例子**：三个声明分别替掉这三段脚本。这段在演示 `dvh`、`aspect-ratio`、`clamp()` 各管一件事。
+
+```css
+.hero {
+  min-block-size: 100dvh;                    /* 动态视口：地址栏伸缩自动跟随 */
+  padding-block: clamp(2rem, 5vw, 5rem);     /* 流式间距：有上下限 */
+}
+
+.thumb {
+  inline-size: 100%;
+  aspect-ratio: 16 / 9;                      /* 比例盒子，图片还没加载也不跳版 */
+  object-fit: cover;
+}
+```
+
+**浏览器做了什么**：`dvh` 在布局时读取「当前」可视视口高度，地址栏收起或展开会触发一次重新解析，不需要监听事件；`svh` / `lvh` 分别取最小与最大视口，适合「绝不被遮挡」的场景。`clamp(min, 首选, max)` 先算中间值再夹取，单位可以是 `vw` 这种相对视口的量。`aspect-ratio` 参与尺寸解析，浏览器在布局阶段就能预留空间，比伪元素撑高少一个盒子。
+
+**对比**：
+
+| 需求 | ❌ 老写法（JS / hack） | ✅ 现代写法（CSS） |
+| --- | --- | --- |
+| 首屏高度 | `--vh` 变量 + `resize` 监听 | `100dvh` |
+| 标题字号 | 三档媒体查询 | `clamp(1.5rem, 4vw, 2.5rem)` |
+| 图片比例 | `padding-top` 百分比 + 绝对定位子元素 | `aspect-ratio` + `object-fit` |
+| 内容宽度 | `max-width` + 左右 `padding` | `inline-size: min(100% - 2rem, 68ch)` |
+
+一个容易忽略的点：`aspect-ratio` 只在至少一个方向尺寸可解析时生效；如果父级高度是 `auto`、宽度也是 `auto`，比例没有参照，盒子就撑不开。
+
+### 1.3 组件按容器变形（size-aware-styling）
+
+**没它会怎样**：卡片组件在 720px 主区里横排好看，塞进 280px 侧栏后图片和文字挤成一条线。你只能加一个 `variant="sidebar"` 属性，让 JS 决定样式。
+
+**最小例子**：把「宽度」这件事交给容器。这段在演示 `container-type` + `@container`：同一份标记，不同宽度的父级里长成不同样子。
+
+```html
+<article class="card">
+  <img class="card__cover" src="cover.jpg" alt="">
+  <div class="card__body">…</div>
+</article>
+```
+
+```css
+.card {
+  container-type: inline-size;   /* 声明：我是查询容器，按行内尺寸回答 */
+}
+
+@container (min-width: 340px) {
+  .card {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    align-items: center;
+  }
+}
+```
+
+**浏览器做了什么**：`container-type: inline-size` 给元素加上**尺寸包含**（size containment）——它的行内尺寸由外部决定，不再受子内容影响，因此「先量容器、再排内容」不会形成循环。查询在父级宽度确定后、子级布局前求值，一次算完，没有 `resize` 回调，也没有布局抖动。
+
+**对比**：
+
+| 维度 | 老写法：JS 量宽度 | 现代写法：容器查询 |
+| --- | --- | --- |
+| 触发 | `ResizeObserver` + 改类名 | 浏览器在布局时直接求值 |
+| 首屏 | 脚本执行前是错的，会闪一下 | 首帧就是正确的 |
+| 复用 | 每个宿主页面都要重新接一遍 | 组件自带查询，放进哪都成立 |
+| 成本 | 每个实例一个观察器 | 零 JS |
+
+**代价**：尺寸包含会让容器的高度不再由内容撑开——如果容器本身没有显式高度，`block-size` 仍可随内容变化（`inline-size` 只包含行内方向），但依赖「父级被内容撑高」的写法要复查。另外，**容器不能查询自己**：`@container` 规则只作用于容器内部的后代，给 `.card` 自己写规则时，匹配的是外层容器。
+
+下面三个 playground 中的第一个，就是拖动滑杆改变容器宽度，看卡片在竖排与横排之间切换。
+
+```jsx playground
+import { useState } from 'react';
+
+export default function App() {
+  const [w, setW] = useState(240);
+  return (
+    <div className="pg-cq">
+      <label className="pg-ctl">
+        容器宽度 {w}px
+        <input type="range" min="180" max="520" value={w} onChange={(e) => setW(Number(e.target.value))} />
+      </label>
+
+      <div className="pg-stage" style={{ width: w }}>
+        <article className="pg-card">
+          <div className="pg-cover">封面</div>
+          <div className="pg-text">
+            <strong>容器查询</strong>
+            <span>窄了竖排，宽了横排。</span>
+          </div>
+        </article>
+      </div>
+
+      <style>{`
+        .pg-cq { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 12px; }
+        .pg-ctl { display: grid; gap: 4px; color: #48505f; }
+        .pg-stage { container-type: inline-size; border: 1px dashed #b9c1cf; border-radius: 12px; padding: 10px; }
+        .pg-card { display: grid; gap: 10px; background: #fff; border: 1px solid #e3e7ee; border-radius: 10px; padding: 10px; }
+        .pg-cover { display: grid; place-items: center; block-size: 56px; border-radius: 6px; background: #e8eefc; color: #3b5bdb; }
+        .pg-text { display: grid; gap: 2px; }
+        @container (min-width: 360px) {
+          .pg-card { grid-template-columns: 96px 1fr; align-items: center; }
+        }
+      `}</style>
+    </div>
+  );
+}
+```
+
+## 🟡 进阶：组合起来解决真实场景
+
+### 2.1 场景一：同一个卡片，侧栏竖排、主区横排（size-aware-styling）
+
+**需求**：`<article class="card">` 同时出现在 260px 的侧栏与 820px 的主区。窄的时候封面在上、文字在下；宽的时候左图右文。
+
+**❌ 老写法**：媒体查询只能看视口。视口 1200px 时，规则对**两个**位置的卡片同时生效——侧栏那张根本放不下 160px 封面加文字，直接溢出。
+
+```css
+@media (min-width: 900px) {
+  .card {
+    display: grid;
+    grid-template-columns: 160px 1fr;  /* 侧栏里的卡片也被迫横排 */
+  }
+}
+```
+
+**✅ 现代写法**：查询最近的尺寸容器。卡片放进侧栏就按侧栏的宽度回答，放进主区就按主区的宽度回答，一行媒体查询都不用改：
+
+```css
+.card { container-type: inline-size; }
+
+@container (min-width: 340px) {
+  .card {
+    display: grid;
+    grid-template-columns: 160px 1fr;
+  }
+}
+```
+
+**为什么不会循环**：容器查询的求值顺序是「父级宽度 → 容器查询 → 子级布局」。`container-type: inline-size` 提前把容器自身的行内尺寸与内容解耦，父级的宽度因此不依赖查询结果，这条链是单向的。没有这层包含，浏览器就会遇到「查询影响内容、内容又影响查询」的循环。
+
+嵌套容器要起名，否则 `@container` 匹配的是最近的容器，容易误伤。`container` 简写是「名字 / 类型」：
+
+```css
+.layout { container: page / inline-size; }
+.card   { container: card / inline-size; }
+
+@container card (min-width: 340px) {
+  /* 明确按卡片宽度判断，哪怕外层还有 page 容器 */
+}
+```
+
+**对比**：
+
+| 维度 | ❌ 媒体查询 | ✅ 容器查询 |
+| --- | --- | --- |
+| 判断依据 | 视口宽度 | 最近的尺寸容器 |
+| 侧栏 + 主区 | 只能二选一，另一个溢出 | 各自按自己的宽度变形 |
+| 复用组件 | 宿主页面要知道组件断点 | 断点跟着组件走 |
+| 触发时机 | 视口变化 | 容器尺寸变化 |
+| 典型坑 | 笔记本外接屏后断点全乱 | 忘了给容器写 `container-type` |
+
+**代价**：`inline-size` 包含会让容器的行内尺寸不受内容影响。如果组件依赖「被内容撑开」（比如内联按钮组），别给它加 `container-type`，改在它的父级上建容器。
+
+### 2.2 场景二：表单错误态，让父级自己变红（child-state-based-styling）（content-based-styling）（style-parent-with-has）（css）
+
+**需求**：输入框校验失败时，整个字段（标签、边框、提示语）一起变红；卡片里有图片才横排、没图片就竖排。过去这两件事都要靠 JS 往父级加类名。
+
+**❌ 老写法**：每次输入都要读 `validity`，再手动切类名。事件漏绑、表单重置、浏览器自动填充都会让状态和样式不同步。
+
+```js
+input.addEventListener('input', () => {
+  field.classList.toggle('is-invalid', !input.checkValidity());
+});
+```
+
+**✅ 现代写法**：`:has()` 让父级根据子级状态匹配。`:user-invalid` 只在用户真正交互过之后才命中，不会一进页面就红一片：
+
+```css
+.field:has(:user-invalid) { border-color: #b3261e; }
+.field:has(:user-invalid) .hint { display: block; }
+
+/* 内容驱动布局：有图才两栏 */
+.card:has(> img) { grid-template-columns: 160px 1fr; }
+```
+
+**浏览器做了什么**：`:has()` 在样式解析阶段求值，DOM 一变、下一次样式重算就会重新匹配，不需要任何事件。它让「父级选择器」成为可能——选择器此前只能沿祖先向后代匹配，现在可以先看后代再回头给祖先上样式。注意特异性：`:has()` 的特异性等于括号内最具体的选择器，配合 `@layer` 才不会被旧规则压住。
+
+**`@layer` 解决的是另一件事**：样式冲突时，谁赢。层叠顺序里，**层的先后比选择器特异性更高**，未分层的样式又排在所有层之后：
+
+```css
+@layer reset, base, components, utilities;  /* 一次声明顺序 */
+
+@layer components {
+  .btn { background: #3b5bdb; }
+}
+@layer utilities {
+  .btn { background: #7048e8; }   /* utilities 在后，赢；和特异性无关 */
+}
+```
+
+把「第三方样式 → 基础 → 组件 → 工具类」按这个顺序定死，再也不用靠 `!important` 打架。迁移时容易踩的坑：未分层的旧规则会赢过所有分层规则，迁移期间要给旧样式也包一层 `@layer legacy`。
+
+**对比**：
+
+| 维度 | ❌ JS 加类名 | ✅ `:has()` |
+| --- | --- | --- |
+| 同步时机 | 事件触发后，可能晚一帧 | 样式重算时同步 |
+| 覆盖场景 | 要分别处理 input / reset / 自动填充 | 只看最终 DOM 状态 |
+| 代码量 | 每个字段 2~5 行脚本 | 一条选择器 |
+| 失败模式 | 忘了绑事件就永远不更新 | 选择器写错则不生效，易排查 |
+
+第二个 playground 演示两件事：输入合法邮箱前后，字段边框由红转绿；勾选「加急」后，整张卡片变色并浮出角标。整段没有一行 JS 在改父级类名，`useState` 只负责受控输入的值。
+
+```jsx playground
+import { useState } from 'react';
+
+export default function App() {
+  const [email, setEmail] = useState('');
+  return (
+    <div className="pgh-root">
+      <div className="pgh-field">
+        <label htmlFor="pgh-email">邮箱</label>
+        <input
+          id="pgh-email"
+          type="email"
+          required
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@example.com"
+        />
+        <span className="pgh-hint">输入不完整时边框变红，完整后变绿</span>
+      </div>
+
+      <div className="pgh-card">
+        <label className="pgh-line">
+          <input type="checkbox" className="pgh-flag" />
+          标记为加急
+        </label>
+        <span className="pgh-badge">加急</span>
+      </div>
+
+      <style>{`
+        .pgh-root { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 12px; max-inline-size: 360px; }
+        .pgh-field { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid #cfd5df; border-radius: 10px; transition: border-color .2s; }
+        .pgh-field input { padding: 6px 8px; border: 1px solid #cfd5df; border-radius: 6px; font: inherit; }
+        .pgh-hint { color: #6b7382; font-size: 12px; }
+        .pgh-field:has(:user-invalid) { border-color: #d33; }
+        .pgh-field:has(:user-invalid) .pgh-hint { color: #b3261e; }
+        .pgh-field:has(:valid) { border-color: #2e7d32; }
+        .pgh-card { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border: 1px solid #cfd5df; border-radius: 10px; transition: background .2s; }
+        .pgh-badge { display: none; padding: 2px 8px; border-radius: 999px; background: #b3261e; color: #fff; font-size: 12px; }
+        .pgh-card:has(.pgh-flag:checked) { background: #fff4f2; border-color: #e5a3a3; }
+        .pgh-card:has(.pgh-flag:checked) .pgh-badge { display: inline-block; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 2.3 场景三：下拉与提示自己找位置（anchor-positioning-tab-underline）（viewport-aware-dropdowns）（position-aware-tooltips）
+
+**需求**：排序下拉贴在按钮右下；靠近视口底部时自动翻到上方；Tab 下划线在选项之间滑动。
+
+**❌ 老写法**：量 `getBoundingClientRect()`，监听 `scroll` 与 `resize`，自己算翻转条件，再把 `top` / `left` 写进内联样式。滚动容器一多，事件就漏；布局一慢，下拉会先出现在错误位置再跳过去。
+
+```js
+function place(trigger, menu) {
+  const r = trigger.getBoundingClientRect();
+  const below = innerHeight - r.bottom;
+  menu.style.top = `${below < menu.offsetHeight ? r.top - menu.offsetHeight : r.bottom}px`;
+  menu.style.left = `${r.left}px`;
+  // 还要监听 scroll / resize / 字体加载 / 容器变化，再全部解绑
+}
+```
+
+**✅ 现代写法**：用 `anchor-name` 登记锚点，用 `position-anchor` 认领锚点，用 `position-area` 指定九宫格方位。翻转交给 `position-try-fallbacks`，浏览器在布局阶段逐个尝试：
+
+```css
+.trigger { anchor-name: --sort; }
+
+.menu {
+  position: absolute;
+  position-anchor: --sort;
+  position-area: block-end span-inline-end;   /* 锚点下方、右对齐 */
+  position-try-fallbacks: flip-block, flip-inline;
+  margin-block-start: 6px;
+  inset: auto;                                /* 清掉 UA 的默认定位 */
+}
+```
+
+**浏览器做了什么**：锚点解析发生在布局阶段，每个候选位置都是一次「放进去试试」的测量，第一个不溢出容器的就采用。`position-area` 把锚点周围划成 3×3 的九宫格，`span-inline-end` 表示横向覆盖到锚点的结束边。没有事件、没有内联样式，滚动与缩放自动跟随。
+
+**提示箭头**也交给锚点函数，不再用 `top: -6px` 硬编码：
+
+```css
+.tip::before {
+  content: "";
+  position: absolute;
+  inset-block-end: anchor(--btn top);   /* 贴着锚点的上边 */
+  inset-inline-start: anchor(--btn center);
+  translate: -50% 50%;
+  rotate: 45deg;                        /* 独立变换属性，见 3.4 */
+}
+```
+
+**Tab 下划线**同理：只给当前选中的标签登记锚点名，伪元素跟随它：
+
+```css
+.tab[aria-selected="true"] { anchor-name: --tab; }
+
+.tabs::after {
+  content: "";
+  position: absolute;
+  inset-block-end: 0;
+  inset-inline-start: anchor(--tab left);
+  inline-size: anchor-size(--tab width);
+  transition: inset-inline-start .2s, inline-size .2s;
+}
+```
+
+第三个 playground：点按钮展开排序菜单，菜单由锚点定位贴在按钮右下；容器滚动时它会跟着走。`@supports` 之外保留了一段绝对定位兜底，不支持锚点定位的浏览器仍能正常展开，只是不会自动翻转。
+
+```jsx playground
+import { useState } from 'react';
+
+export default function App() {
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState('最新');
+  return (
+    <div className="pg-anchor">
+      <div className="pg-row">
+        <button className="pg-select" onClick={() => setOpen(!open)} aria-expanded={open}>
+          排序：{value}
+        </button>
+        {open && (
+          <ul className="pg-list">
+            {['最新', '最热', '价格'].map((item) => (
+              <li key={item}>
+                <button
+                  className="pg-opt"
+                  onClick={() => { setValue(item); setOpen(false); }}
+                >
+                  {item}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <style>{`
+        .pg-anchor { font: 14px/1.6 system-ui, sans-serif; padding-block: 8px; }
+        .pg-row { position: relative; display: inline-block; }
+        .pg-select { anchor-name: --pg-sort; padding: 6px 14px; border: 1px solid #c8ccd4; border-radius: 8px; background: #fff; cursor: pointer; font: inherit; }
+        .pg-list { position: absolute; inset-block-start: 100%; inset-inline-start: 0; margin: 6px 0 0; padding: 6px; list-style: none; background: #fff; border: 1px solid #dfe3ea; border-radius: 10px; box-shadow: 0 12px 32px rgb(0 0 0 / .16); min-inline-size: 140px; }
+        .pg-opt { inline-size: 100%; text-align: start; padding: 6px 8px; border: 0; border-radius: 6px; background: none; cursor: pointer; font: inherit; }
+        .pg-opt:hover { background: #f1f4f9; }
+        @supports (position-area: block-end) {
+          .pg-list {
+            position-anchor: --pg-sort;
+            position-area: block-end span-inline-end;
+            position-try-fallbacks: flip-block;
+            inset: auto;
+            margin-block-start: 6px;
+          }
+        }
+      `}</style>
+    </div>
+  );
+}
+```
+
+## 🔴 高阶：边界、性能与降级
+
+### 3.1 兼容线与写法代价
+
+| 特性 | 现状 | 不支持时 | 建议 |
+| --- | --- | --- | --- |
+| 容器查询 + `cqi` | Widely | 退回媒体查询，组件会「猜」错 | 保留一套媒体查询兜底 |
+| `:has()` | Widely | 父级高亮失效，状态仍在 | 关键逻辑别只靠样式 |
+| `@layer` | Widely | 层叠退回特异性竞赛 | 迁移期别混用未分层样式 |
+| 锚点定位 | Chromium / Safari | 菜单位置错乱或被裁 | `@supports` 内包 anchor 规则 |
+| `calc-size()` | 部分浏览器 | 尺寸声明整条无效 | 前面写一条静态值 |
+| `interpolate-size` | 部分浏览器 | `auto` 高度动画不生效 | 保留 `max-height` 兜底 |
+| `@function` | 部分浏览器 | 自定义函数不解析 | 构建期用 Sass / PostCSS |
+| `style()` 容器查询 | Chromium / Safari | 密度变体失效 | 用类名或属性选择器兜底 |
+| `sibling-index()` | 仅 Chromium | 交错延迟消失 | `nth-child` 列举前几项 |
+
+判断原则只有一条：**样式失效通常不报错，只是不生效**。所以每条新能力都要问「不支持时页面是否还能用」，而不是「不支持时是否好看」。降级写在同一条规则之前，让旧浏览器先命中静态值：
+
+```css
+.menu {
+  position: absolute;
+  inset-block-start: 100%;              /* 兜底：贴在触发器下方 */
+}
+
+@supports (position-area: block-end) {
+  .menu { position-anchor: --sort; position-area: block-end; inset: auto; }
+}
+```
+
+### 3.2 容器单位与内在尺寸运算（fluid-scaling）（calculate-with-intrinsic-sizes）（animate-to-intrinsic-sizes）
+
+**容器单位**让字号跟着容器走，而不是跟着视口。`cqi` 是容器行内尺寸的 1%，`cqw` / `cqh` / `cqb` 分别是宽、高、块向的 1%：
+
+```css
+.card { container-type: inline-size; }
+.card__title { font-size: clamp(1rem, 4cqi, 1.5rem); }
+```
+
+在 300px 宽的侧栏里 `4cqi` 约 12px，在 800px 的主区里约 32px，`clamp` 再把两端夹住。过去这件事要靠 JS 量宽度写 `--ratio`，现在在布局阶段就解析完。
+
+**`calc-size()`** 允许对 `auto`、`min-content` 这类内在尺寸做算术。`min()` / `calc()` 遇到关键字直接失效，所以下面这句话以前写不出来：
+
+```css
+.panel {
+  inline-size: calc-size(auto, size * 0.9);   /* 内容的自然宽度打九折 */
+}
+```
+
+**`interpolate-size`** 让 `block-size: auto` 可以参与过渡。之前的通用做法是给 `max-height` 猜一个足够大的值：
+
+```css
+/* ❌ 老办法：值猜大了动画前段会「空转」，猜小了内容被截 */
+.acc { max-block-size: 0; overflow: hidden; transition: max-block-size .3s; }
+.acc[open] { max-block-size: 600px; }
+```
+
+```css
+/* ✅ 现代写法：从 0 过渡到内容高度 */
+:root { interpolate-size: allow-keywords; }
+.acc { block-size: 0; overflow: hidden; transition: block-size .3s; }
+.acc[open] { block-size: auto; }
+```
+
+代价要说清：`block-size` 是布局属性，每一帧都要重新排内容，长列表上会掉帧。条目多时改用 `grid-template-rows: 0fr → 1fr` 或直接 `transition: opacity` + `content-visibility`，只在视觉上做淡入。
+
+### 3.3 语义风格查询与函数（usage-aware-component-variations）（reduce-style-repetition）（atrule-support-conditionals）（selector-atrule-combinations）
+
+**风格查询**按继承的变量匹配，不按尺寸。同一个卡片，父级把密度标成 `compact`，内部间距就收紧——不用给每个子元素传类名：
+
+```css
+.card { container-type: inline-size; }
+
+@container style(--density: compact) {
+  .card__body { gap: 4px; }
+}
+```
+
+**`@function`** 把重复的 `clamp()` 收成具名函数，参数带类型与默认值：
+
+```css
+@function --fluid(--min <length>, --max <length>) returns <length> {
+  result: clamp(var(--min), 5cqi, var(--max));
+}
+.title { font-size: --fluid(1rem, 1.75rem); }
+```
+
+**`@supports` 能检测的东西变多了**。除了声明，还能检测选择器与 at-rule：`selector()` 判断选择器能否解析，`at-rule()` 判断某条规则是否被认识。两者可以组合：
+
+```css
+@supports (container-type: inline-size) and selector(:has(> img)) {
+  /* 两个能力都在才启用这套布局 */
+}
+
+@supports at-rule(@starting-style) {
+  /* 认识 @starting-style，才写入场动画 */
+}
+```
+
+重复的「媒体条件 + 选择器」可以收进自定义媒体查询，但 `@custom-media` 尚未全平台支持，构建期用 `postcss-custom-media` 展开最稳：
+
+```css
+@custom-media --narrow (width < 600px);
+
+@media (--narrow) and (hover: none) {
+  .row { flex-direction: column; }
+}
+```
+
+### 3.4 裁剪与变换的精细控制（overflow-clipping-control）（individual-transform-properties）
+
+**`overflow: clip`** 只裁剪，不建立滚动容器。`hidden` 会建立一个可以编程滚动的盒子（`scrollIntoView()`、`scrollTop` 都能动它），`clip` 不会，焦点也不会把被裁掉的内容滚出来：
+
+```css
+.avatar { overflow: clip; overflow-clip-margin: 4px; border-radius: 50%; }
+```
+
+`overflow-clip-margin` 把裁剪边界向外推，适合「允许光晕/阴影露出一点」的头像或贴纸，而不必用负外边距。
+
+**独立变换属性**把 `translate`、`rotate`、`scale` 拆成三个可独立过渡的属性。它们按 `translate → rotate → scale` 的顺序应用，且在 `transform` 之前。好处是动画互不覆盖：
+
+```css
+.badge { translate: 0 -50%; rotate: 8deg; scale: 1; transition: scale .2s; }
+.badge:hover { scale: 1.15; }   /* 不会重置 translate 与 rotate */
+```
+
+**对比**：
+
+| 维度 | `transform: translate() rotate() scale()` | 独立属性 |
+| --- | --- | --- |
+| 改一个分量 | 重写整条简写 | 只写 `scale` |
+| 兼容性 | 全平台 | Widely（2022 起） |
+
+### 3.5 兄弟位次与单行溢出（dynamic-sibling-styling）（single-line-overflow）
+
+**按位次算样式**过去只能写 `:nth-child(1)` 到 `:nth-child(6)` 逐条列举，插入一项后全乱。`sibling-index()` 返回当前元素在兄弟中的位置（从 1 开始），`sibling-count()` 返回总数，可以直接参与计算：
+
+```css
+.chip {
+  transition-delay: calc(sibling-index() * 40ms);  /* 逐个入场 */
+  opacity: calc(0.4 + (sibling-index() / sibling-count()) * 0.6);
+}
+```
+
+```css
+/* ❌ 老写法：项数一多就失控 */
+.chip:nth-child(1) { transition-delay: 40ms; }
+.chip:nth-child(2) { transition-delay: 80ms; }
+.chip:nth-child(3) { transition-delay: 120ms; }
+```
+
+**单行溢出**的三件套缺一不可：`overflow` 不能是 `visible`，`white-space: nowrap` 保证不换行，`text-overflow` 才轮到画省略号。放在 flex 子项里还要配 `min-inline-size: 0`：
+
+```css
+.row { display: flex; gap: 8px; }
+.row .name {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+```
+
+多行省略用 `-webkit-line-clamp`（配合 `display: -webkit-box` 与 `overflow: hidden`），它是目前唯一稳定的跨浏览器方案；更进一步的 `line-clamp` 仍在推进。截断只是视觉，全文要可达：给它 `title` 或一个展开按钮，别让读屏器也丢掉后半句。
+
+## 📋 决策速查
+
+| 你想实现 | 用什么 | Baseline | 注意 |
+| --- | --- | --- | --- |
+| 自适应卡片墙 | `grid` + `auto-fit` + `minmax(min(...))` | Widely | 子项补 `min-inline-size: 0` |
+| 首屏高度 | `100dvh` | Widely | 需要「绝不被遮挡」用 `svh` |
+| 流式字号 | `clamp()` / `cqi` | Widely | 保留上下限，别小于 1rem |
+| 组件按容器变形 | `container-type` + `@container` | 2023 | 容器不能查询自己 |
+| 父级跟随子级状态 | `:has()` + `:user-invalid` | 2023 | 特异性按括号内最具体者算 |
+| 控制样式谁赢 | `@layer` | 2022 | 未分层样式赢过所有层 |
+| 能力检测 | `@supports selector()` / `at-rule()` | 部分 | 检测点选真实用到的能力 |
+| 下拉 / tooltip 定位 | `anchor-name` + `position-area` | 部分 | 包在 `@supports` 里并留兜底 |
+| 高度 auto 动画 | `interpolate-size` | 部分 | 长列表改用 `0fr → 1fr` |
+| 交错入场延迟 | `sibling-index()` | 仅 Chromium | 兜底列举前 5 项 |
+
+## ⚠️ 五个常见坑
+
+1. **给组件自己加 `container-type` 却查询自己**。`@container` 只匹配祖先容器；规则要写在容器内的后代上，或者把容器建在父级。
+2. **`min-width: 0` 忘了写**。flex / grid 子项的最小尺寸默认是 `auto`，长单词、长链接、`<pre>` 都会把布局撑破。
+3. **把 `@layer` 和未分层旧样式混用**。未分层规则永远赢，迁移时会以为「新样式没生效」。
+4. **`text-overflow` 单打独斗**。没有 `overflow: hidden` 与 `white-space: nowrap`，省略号不会出现。
+5. **锚点规则不包 `@supports`**。不支持的浏览器会忽略整组定位声明，菜单掉回文档流；先写静态位置再增强。
+
+## ✅ 自测三问
+
+1. 把卡片从主区拖到 240px 侧栏，它会自己换布局吗？如果只写媒体查询，会在哪一档露馅？
+2. 表单提交失败时，红框是事件驱动的还是 DOM 状态驱动的？重置表单后能自己恢复吗？
+3. 下拉菜单在视口底部会翻到上方吗？把 `resize` 监听全删掉之后，它还能跟随滚动吗？
+
+## 关键要点
+
+- **先选引擎再谈适配**：一维用 `flex`，二维用 `grid`，比例与裁剪交给 `aspect-ratio` / `overflow`。
+- **单位优先于脚本**：`dvh`、`clamp()`、`cqi` 都在布局阶段解析，不再需要 `resize` 回调。
+- **查询容器，不查询视口**：组件的断点属于组件自己，`container-type` 是它成立的前提。
+- **状态用选择器表达**：`:has()`、`:user-invalid` 让父级跟随真实 DOM 状态，比手动切类名少一类 bug。
+- **定位交给锚点，尺寸交给内在关键字**：`position-area` 与 `calc-size()` 把测量工作还给浏览器。
+
+## 延伸阅读
+
+- [CSS Containment / Container Queries（MDN）](https://developer.mozilla.org/docs/Web/CSS/CSS_containment) ｜ [Container Queries（web.dev）](https://web.dev/articles/cq-stable)
+- [`:has()` 家族（MDN）](https://developer.mozilla.org/docs/Web/CSS/:has) ｜ [Cascade Layers（MDN）](https://developer.mozilla.org/docs/Web/CSS/@layer)
+- [CSS Anchor Positioning（MDN）](https://developer.mozilla.org/docs/Web/CSS/CSS_anchor_positioning) ｜ [CSS Values 5：`calc-size()`（MDN）](https://developer.mozilla.org/docs/Web/CSS/calc-size)
+
+---
+
+← 上一章：[01 HTML 与原生交互](/web/01-html-interactive) ｜ 下一章：[03 动效与视图过渡](/web/03-motion-view-transitions)

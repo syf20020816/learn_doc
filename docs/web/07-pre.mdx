@@ -1,0 +1,148 @@
+# 07-pre Core Web Vitals：LCP / INP / CLS 手册
+
+> 
+> Google 三大核心网页指标，用于衡量**加载体验、交互响应、视觉稳定性**，是搜索排名信号；统计口径看 **75分位（p75）** 用户数据
+
+| 指标 | 全称 | 衡量方向 | ✅良好 | ⚠️需改进 | ❌差 |
+| --- | --- | --- | --- | --- | --- |
+| LCP | Largest Contentful Paint 最大内容绘制 | 加载速度 | ≤2.5s | 2.5s ~ 4s | >4s |
+| INP | Interaction to Next Paint 交互到下一次绘制 | 交互响应 | ≤200ms | 200ms ~ 500ms | >500ms |
+| CLS | Cumulative Layout Shift 累积布局偏移 | 视觉稳定 | ≤0.1 | 0.1 ~ 0.25 | >0.25 |
+
+## 一、指标详解
+
+### 1. LCP 最大内容绘制
+
+**含义**：页面开始加载后，视口内**最大的内容元素渲染完成**的时间点
+合法元素：
+
+- `<img>`、svg 内 `<image>`、video 的海报帧
+- 带 `background-image` 的元素
+- 包含文本的块级元素
+
+> 
+> ✅ 关键点：用户一旦点击/滚动/按键，浏览器就停止更新 LCP；LCP 只描述**初始加载**，不包含后续渲染。
+> ❌ 常见坏场景：首屏大图没压缩、TTFB 慢、阻塞 JS/CSS、图片没预加载。
+
+### 2. INP 交互到下一次绘制（2024年替代旧FID）
+
+**含义**：页面整个生命周期内，所有有效交互（点击、触摸、键盘输入，滚动/缩放不算）从**触发交互 → 浏览器完成下一帧绘制**的耗时；取最差值（交互多的时候取98分位，剔除极端异常值）
+
+一次交互三段耗时：
+
+1. Input Delay：主线程被长任务卡住，事件排队等待
+2. Processing Duration：事件回调函数执行耗时
+3. Presentation Delay：状态更新后，浏览器渲染下一帧
+
+> 
+> ❌ 常见坏场景：大量同步JS、大计算、长任务阻塞主线程、点击回调里大量DOM操作。
+
+### 3. CLS 累积布局偏移
+
+**含义**：意外的页面跳动，计算公式：
+`单次偏移分数 = 影响比例(impact fraction) × 距离比例(distance fraction)`
+页面所有**非用户主动触发**的偏移累加就是 CLS
+
+> 
+> 用户主动触发（点击展开、切换tab）的布局变化不计入 CLS
+> ❌ 常见坏场景：图片/视频没设置宽高、动态加载广告、字体晚加载、接口回来后插入内容挤下方元素。
+
+---
+
+## 二、测量方式（实验室 + 真实用户RUM）
+
+### 方式1：web-vitals 官方库（生产RUM，推荐）
+
+官方库，底层基于浏览器 Performance API，和 CrUX、PSI 计算逻辑对齐，轻量。
+
+```
+npm install web-vitals
+```
+
+```
+import { onLCP, onINP, onCLS } from 'web-vitals';
+
+// 上报回调，把数据发自己后端
+function sendToRUM(metric) {
+  console.log(metric);
+  // metric 包含 name、id、value、delta、attribution（归因版才有详情）
+  fetch('/api/report-vital', {
+    method: 'POST',
+    keepalive: true, // 页面卸载也能发出去
+    body: JSON.stringify(metric),
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+onLCP(sendToRUM);
+onINP(sendToRUM);
+onCLS(sendToRUM);
+```
+
+CDN 直接引入版本（不用打包）
+
+```
+<script type="module">
+import {onLCP, onINP, onCLS} from '[https://unpkg.com/web-vitals@6?module](https://unpkg.com/web-vitals@6?module)';
+onLCP(console.log);
+onINP(console.log);
+onCLS(console.log);
+</script>
+```
+
+> 
+> 两个构建包：
+> 
+> 
+> - `web-vitals`：标准包，只拿数值
+> - `web-vitals/attribution`：归因包，附带慢任务、元素、长任务栈，适合定位问题（体积更大）
+
+### 方式2：Chrome DevTools（实验室本地调试）
+
+1. Performance 面板：录制，结束后顶部直接展示 Core Web Vitals，能看到 LCP标记、交互耗时、布局偏移闪烁提示
+2. Lighthouse（灯塔）：Lighthouse 面板，跑性能审计，输出实验室环境下的 CWV；⚠️ Lighthouse 的 INP 是模拟值，**不等于真实用户INP**
+
+### 方式3：PageSpeed Insights (PSI)
+
+[https://pagespeed.web.dev/](https://pagespeed.web.dev/)
+
+- 上方：CrUX 真实用户现场数据（来自Chrome用户）
+- 下方：Lighthouse 实验室诊断，给优化建议
+
+### 方式4：CrUX / Google Search Console
+
+CrUX（Chrome User Experience Report）谷歌真实用户数据集；GSC 体验面板直接看站点CWV达标情况。
+
+### 方式5：原生 Performance API（自己手写采集，不推荐）
+
+- LCP：`PerformanceObserver` 监听 `largest-contentful-paint`
+- INP：监听 `event`（Event Timing API）
+- CLS：监听 `layout-shift`，过滤 `hadRecentInput === false` 的偏移再累加> 
+> 坑很多，边界逻辑复杂，优先 web-vitals。
+
+```
+// LCP 原生示例（仅演示）
+const obs = new PerformanceObserver((list) => {
+  const entries = list.getEntries();
+  const lcp = entries.at(-1);
+  console.log('LCP:', lcp.startTime);
+});
+obs.observe({ type: 'largest-contentful-paint', buffered: true });
+```
+
+---
+
+## 三、常见坑（面试高频）
+
+1. Lighthouse 是**实验室指标**，网络、设备固定；CrUX / web-vitals 是真实用户，二者经常不一致
+2. INP：页面全程没有任何点击交互 → **没有INP数据**
+3. CLS：用户点击触发的展开/弹窗，不算偏移；图片预留宽高、aspect-ratio 是最有效的优化手段
+4. 看指标必须看 **p75**，不要看平均值；有一部分用户设备差、网络差，决定是否达标
+5. `keepalive:true` 上报很关键，用户关页面时，普通fetch会被取消
+
+## 四、快速优化方向（配套记忆）
+
+- LCP：优化TTFB、图片压缩/WEBP/AVIF、预加载LCP图片、移除阻塞资源、CDN
+- INP：拆分长任务、避免主线程大量同步计算、虚拟列表、WebWorker、防抖节流
+- CLS：图片/iframe固定宽高+aspect-ratio、预留广告位、font-display: swap、不要在已有内容上方插入元素
+

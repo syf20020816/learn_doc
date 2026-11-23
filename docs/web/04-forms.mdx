@@ -1,0 +1,601 @@
+---
+title: 04 · 表单与输入
+description: 从「一进页面就标红、拼音被当关键词提交、自动填充后样式崩了」这三个真实毛病出发，讲清校验时机、autocomplete token、IME 与原生控件的分级品牌化。
+---
+
+# 第 4 章 表单与输入
+
+> **难度**：🟢 入门 ｜ **前置**：[01 HTML 与原生交互](/web/01-html-interactive) ｜ **学完你能**：写出能自动填充、中文输入不误提交、报错时机舒服、还有品牌感的表单，同时不牺牲原生键盘与读屏体验。
+
+**这一章要解决的毛病**
+
+- 用户刚敲出 `user@gm`，输入框就红了；更糟的是页面刚打开，所有必填项已经一片红。
+- 中文输入法里按 Enter 选词，搜索框直接把拼音当成关键词提交了。
+- 浏览器自动填充后，输入框变成一块突兀的黄底，文字颜色和设计稿完全不同；用户一编辑又闪回原样。
+
+## 🟢 入门：先让它跑起来
+
+表单的「跑起来」不是画出输入框，而是让浏览器认识它：知道每个控件叫什么、该填什么、什么时候算错。这三件事全靠 HTML 属性和 CSS 伪类，一行 JS 都不用。
+
+### 1.1 先给表单一副骨架（forms）
+
+**没它会怎样**：用 `div` 拼输入框、用点击事件处理「登录」，回车不会提交、读屏读不出字段名称、密码管理器认不出这是登录表单；更常见的是「显示密码」按钮忘了写 `type="button"`，用户一点就把整个表单提交了——密码框里还是空的。
+
+**这段在演示什么**：一个能被浏览器完整识别的登录表单——容器是 `form`，每个控件有 `name` 和 `label`，辅助按钮显式声明类型。
+
+```html
+<form action="/login" method="POST">
+  <label for="email">邮箱</label>
+  <input id="email" name="email" type="email" autocomplete="username" required>
+
+  <label for="pwd">密码</label>
+  <input id="pwd" name="pwd" type="password" autocomplete="current-password" required>
+
+  <button type="button" id="toggle-pwd">显示密码</button>
+  <button type="submit">登录</button>
+</form>
+```
+
+**浏览器做了什么**：`label` 的 `for` 与控件的 `id` 建立关联后，点标签等于点控件、读屏会播报标签文本；`name` 决定提交时的字段名，没有 `name` 的控件根本不会出现在请求里；`form` 内有一个 `type="submit"` 按钮时，在单行文本框里按 Enter 会触发「隐式提交」，而 `type="button"` 永远不会。
+
+**对比**：
+
+| 维度 | 老写法（`div` + 点击事件） | 现代写法（`form` + `label`） |
+| --- | --- | --- |
+| 回车提交 | 自己监听 `keydown` | 浏览器原生支持 |
+| 读屏播报 | 手动补 `aria-label` | `label` 自动关联 |
+| 密码管理器识别 | 基本认不出 | 认 `form` + `name` + `autocomplete` |
+| 约束校验 | 每个字段手写 if | `required` / `pattern` / `type` 声明式 |
+
+### 1.2 让浏览器替你填（autofill-payment-form）
+
+**没它会怎样**：用户明明在浏览器里存了银行卡，到了结算页还是得从头敲 16 位卡号；填完还发现前导零没了、滚轮滑一下数字变了。对支付表单来说，这不是体验问题，是弃单问题——每多一个字段，就多一批人离开。
+
+**这段在演示什么**：三个支付字段的最小组合。`type="text"` + `inputmode="numeric"` 既拿到数字键盘，又保住字符串。
+
+```html
+<input name="cc-number" autocomplete="cc-number"
+       type="text" inputmode="numeric" maxlength="19" pattern="[\d ]{13,19}" required>
+<span id="exp-hint">格式：MM/YY</span>
+<input name="cc-exp" autocomplete="cc-exp"
+       type="text" inputmode="numeric" maxlength="5" required aria-describedby="exp-hint">
+<input name="cc-csc" autocomplete="cc-csc"
+       type="text" inputmode="numeric" maxlength="4" pattern="[0-9]{3,4}" required>
+```
+
+**浏览器做了什么**：`autocomplete` 的 token 是一份浏览器与密码管理器共用的「语义字典」。`cc-number` 告诉它这是卡号、`cc-exp` 是有效期、`cc-csc` 是安全码，它才会把已存数据对应地填进来并弹出一键填充。没有 token，再像卡号的输入框也只是一串普通数字。填充发生时浏览器会派发 `input` 事件（部分浏览器还派发 `change`），所以依赖「用户输入」的逻辑要能接住这次事件。
+
+**token 速查表（这一章最该记住的一张表）**：
+
+| 字段 | token | 配套写法 | 常见错误 |
+| --- | --- | --- | --- |
+| 登录名 | `username` | `type="text"` + `autocapitalize="none"` | 用 `email` 去接手机号登录 |
+| 现有密码 | `current-password` | `type="password"` | 登录页写成 `new-password` |
+| 新密码 | `new-password` | 触发强密码生成器 | 注册页写成 `current-password` |
+| 卡号 | `cc-number` | `text` + `inputmode="numeric"` | 用 `type="number"` 丢前导零 |
+| 有效期 / 安全码 | `cc-exp` / `cc-csc` | 允许空格、不掩码安全码 | 把安全码也做成密码框 |
+| 验证码 | `one-time-code` | 单输入框 | 拆成六个格子 |
+| 街道地址 | `street-address` | 优先单个多行文本 | 硬拆成「省/市/区」三列 |
+| 邮箱 / 电话 | `email` / `tel` | `type="email"` / `inputmode="tel"` | 电话也用 `type="number"` |
+
+三条容易踩的细节：数字标识**绝不用 `type="number"`**（会加步进按钮、滚轮误改、丢前导零）；卡号允许空格，`pattern` 写成 `[\d ]{13,19}`，提交前再统一剔除；安全码不要掩码，用户手里就拿着卡，掩码只是让他看不见自己输了什么。
+
+**这段在演示什么**：接管自动填充后的黄底。`:autofill` 只匹配被浏览器填过的字段，用户一编辑就停止匹配，所以样式必须做到「切换时布局不抖」。
+
+```css
+/* ❌ 直接改 border / background：多数 UA 用 !important 压住背景，
+   而且 border 一变，输入框在「填充 → 编辑」之间会跳一下 */
+input:autofill { border: 2px solid var(--autofill-ring); background: #fff; }
+
+/* ✅ 内嵌环 + 内嵌大背景：不改盒模型，切换时零位移 */
+input:is(:autofill, :-webkit-autofill) {
+  box-shadow:
+    inset 0 0 0 2px var(--autofill-ring),
+    inset 0 0 0 100vmax var(--autofill-bg); /* 盖住 UA 的 !important 背景 */
+  -webkit-text-fill-color: var(--autofill-text);
+  caret-color: var(--autofill-text);
+}
+```
+
+**同一家族的字段**：地址表单（autofill-address-form）优先用单个 `street-address` 文本域，分列时用 `address-line1/2/3`、`address-level2`，不要硬拆姓名；登录表单（autofill-sign-in-form）用 `username` + `current-password`，并加 `spellcheck="false"`、`autocapitalize="none"`，别让浏览器「纠正」邮箱；注册表单（autofill-sign-up-form）用 `new-password` 并给出强度提示；高亮定制（autofill-highlight-inputs）是纯渐进增强，不支持就保留默认黄底，**不要**写 JS 回退。
+
+### 1.3 该报错的时候才报错（validate-input-after-interaction）
+
+**没它会怎样**：用 `:invalid` 做红框，页面一加载所有必填项就是红的；用户输到一半（`user@gm`）又红一次，边打字边被否定。等他把内容改对了，红色还得靠 JS 手动清——漏一次就永远挂着。
+
+**这段在演示什么**：把样式挂在 `:user-invalid` 上。左边是老写法（一进页面就红），右边是现代写法：只有「改过并离开」或「尝试提交」之后才匹配，修正后立刻停止匹配。
+
+```css
+/* ❌ 只看约束是否满足：首帧就命中 */
+.field input:invalid { border-color: #d93025; background: #fce8e6; }
+
+/* ✅ 还要求「用户交互过」：初始干净，提交被拦时也命中 */
+.field input:user-invalid { border-color: #d93025; background: #fce8e6; }
+.field input:user-valid   { border-color: #188038; }
+.field input:user-invalid + .error-msg { display: block; }
+
+/* 兜底：不认新伪类的浏览器不会丢弃整条规则，可配合 JS 加 class */
+.field .is-invalid input { border-color: #d93025; }
+```
+
+**浏览器做了什么**：浏览器为每个控件记录「用户是否已经改过（dirty）」这个内部状态。`:invalid` 只算约束，所以首帧就命中；`:user-invalid` 额外要求这个状态为真，于是初始页面永远干净。表单提交被拦截时，浏览器会把没通过的字段标成「已交互」，这就是「点提交后整片变红」的来源。两个伪类都是无状态计算：用户把内容改对，红框当帧消失，不需要清理任何标记。
+
+**`:invalid` vs `:user-invalid` 的时机差异**：
+
+| 时机 | `:invalid` | `:user-invalid` |
+| --- | --- | --- |
+| 页面首次渲染 | 所有必填项立刻命中 | 保持干净 |
+| 输入中（`user@gm`） | 每敲一键都命中 | 不命中，不打断 |
+| 失焦（已编辑过） | 命中 | 命中 |
+| 点提交被拦截 | 命中 | 命中，并自动聚焦第一个 |
+| 改成合法值 | 立即停止命中 | 立即停止命中 |
+| `:user-valid` | — | 只对「交互过且合法」的字段命中 |
+
+`:user-valid` 别滥用：给每个字段都挂绿色对勾，会和必填星号、错误图标一起变成「红绿灯」，反而增加认知负担。通常只在单字段强校验（用户名可用、密码强度够）时用。
+
+动手试试：第一个框用 `:invalid`，第二个用 `:user-invalid`。先什么都不做——第一个一进来就是红的；再各输入 `user@gm` 并点到别处，比较报错时机。
+
+```jsx playground
+import { useState } from 'react';
+
+export default function App() {
+  const [value, setValue] = useState('');
+  const hint = value.length > 0 && !value.includes('@')
+    ? '格式还不完整，但这里只是提示，不是报错。'
+    : '离开输入框后才会出现红框。';
+  return (
+    <div className="pg-uv">
+      <label className="pg-uv-row">
+        <span>裸 :invalid（一进来就红）</span>
+        <input type="email" required placeholder="点我再看别处" />
+      </label>
+      <label className="pg-uv-row">
+        <span>:user-invalid（交互后才红）</span>
+        <input
+          type="email"
+          required
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="输入 user@gm 再离开"
+        />
+      </label>
+      <p className="pg-uv-tip">{hint}</p>
+      <style>{`
+        .pg-uv { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 14px; max-inline-size: 360px; }
+        .pg-uv-row { display: grid; gap: 6px; }
+        .pg-uv-row input { padding: 8px 10px; border: 2px solid #c8ccd4; border-radius: 8px; }
+        .pg-uv-row:first-child input:invalid { border-color: #d93025; background: #fce8e6; }
+        .pg-uv-row:nth-child(2) input:user-invalid { border-color: #d93025; background: #fce8e6; }
+        .pg-uv-tip { margin: 0; color: #5b6472; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+配套三件事：错误不能只靠颜色，要配图标或文案；格式提示放输入框上方并用 `aria-describedby` 关联；`aria-invalid` 与视觉态需要一小段 JS 同步（初始 `false`，`matches(':user-invalid')` 时置 `true`）——伪类只能改样式，改不了可访问性树。
+
+必填反馈（required-field-feedback）与下拉校验（select-menu-interaction）沿用同一套时机：错误文案常驻 DOM、只在 `:user-invalid` 时显示，星号用 `aria-hidden` 包住（`required` 已经会让读屏播报必填），提交按钮保持可用，让浏览器自动聚焦第一个错误项。
+
+## 🟡 进阶：组合起来解决真实场景
+
+入门解决了「表单能被浏览器认识」。接下来是三个真实场景：输入法带来的误提交、验证码怎么填才不别扭、以及品牌化时到底该不该自己画控件。
+
+### 2.1 中文输入法下按 Enter 不误发（ime-safe-enter-submit）
+
+**不加这一步会看到什么**：用户在搜索框打「你好」，拼音还停在候选状态，按 Enter 想选词，页面直接把一串拼音提交成关键词。英文用户永远复现不了这个问题，所以这个 bug 常常活到上线。
+
+**这段在演示什么**：两种 Enter 处理。❌ 只看按键名；✅ 先放行输入法组合状态，再走正常的提交入口。
+
+```js
+/* ❌ 任何 Enter 都当作「发送」 */
+input.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') send(input.value);
+});
+
+/* ✅ 组合中放行；Shift+Enter 换行；提交走 requestSubmit 保留校验 */
+input.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' || event.shiftKey) return;
+  event.preventDefault();
+  if (event.isComposing || event.keyCode === 229) return; // 这一下是选词，不是发送
+  form.requestSubmit();
+});
+```
+
+**浏览器做了什么**：输入法组合期间，按键会伴随 `compositionstart` / `compositionupdate` 事件，此时 `KeyboardEvent.isComposing` 为 `true`，`key` 常常是 `Process`；确认候选词的那一下 Enter 同样在组合中被派发。老 Safari 存在顺序差异——有时先派发 `compositionend` 再派发 `keydown`，标志已经复位，所以要用 `keyCode === 229` 兜底（229 是「输入法正在处理」的历史约定）。
+
+这个检查适用于**一切**自定义 Enter 处理：搜索框、重命名、命令面板都会吃到输入法的确认键。而原生 `form` 里的隐式提交，浏览器已经自动抑制，不需要你处理；`Cmd/Ctrl+Enter` 与输入法确认键不冲突，也不用检查。
+
+**对比**：
+
+| 维度 | 老写法（只看 `key === 'Enter'`） | 现代写法（IME 安全） |
+| --- | --- | --- |
+| 中文选词回车 | 提交半截拼音 | 放行给输入法，不提交 |
+| 判断依据 | 按键名 | `isComposing` + `keyCode === 229` |
+| 老 Safari | 无解 | keyCode 兜底 |
+| 长文本换行 | 常被忽略 | `Shift + Enter` 显式放行 |
+
+动手试试：勾选「模拟组合中」再按 Enter——不会发送；取消勾选后按 Enter 才发送。装了中文输入法的话，直接打一句话选词按 Enter 也一样。
+
+```jsx playground
+import { useRef, useState } from 'react';
+
+export default function App() {
+  const composing = useRef(false);
+  const [simulate, setSimulate] = useState(false);
+  const [text, setText] = useState('');
+  const [log, setLog] = useState([]);
+  const send = () => {
+    if (!text.trim()) return;
+    setLog((list) => [text.trim(), ...list].slice(0, 4));
+    setText('');
+  };
+  return (
+    <div className="pg-ime">
+      <label className="pg-ime-sim">
+        <input type="checkbox" checked={simulate} onChange={() => setSimulate(!simulate)} />
+        模拟组合中（选词确认键）
+      </label>
+      <textarea
+        value={text}
+        placeholder="打一句话，按 Enter 发送；Shift+Enter 换行"
+        onChange={(e) => setText(e.target.value)}
+        onCompositionStart={() => { composing.current = true; }}
+        onCompositionEnd={() => { composing.current = false; }}
+        onKeyDown={(e) => {
+          if (e.key !== 'Enter' || e.shiftKey) return;
+          e.preventDefault();
+          if (e.isComposing || composing.current || simulate) return;
+          send();
+        }}
+      />
+      <div className="pg-ime-log">
+        {log.length === 0 ? <span>还没有发送记录</span> : log.map((m, i) => <b key={i}>{m}</b>)}
+      </div>
+      <style>{`
+        .pg-ime { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 10px; max-inline-size: 380px; }
+        .pg-ime-sim { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+        .pg-ime textarea { min-block-size: 84px; padding: 10px; border: 1px solid #c8ccd4; border-radius: 10px; resize: vertical; }
+        .pg-ime-log { display: grid; gap: 6px; min-block-size: 30px; color: #5b6472; }
+        .pg-ime-log b { padding: 6px 10px; border-radius: 8px; background: #eef3ff; color: #1f3b73; font-weight: 500; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+同一个「输入体验」家族里还有字段宽度：用 `field-sizing: content` 让输入框随内容伸缩（form-fields-automatically-fit-contents），替代「按平均字符数猜宽度」。必须配上下限，否则会缩到 0 或无限拉长。
+
+**这段在演示什么**：三个控件各给一套上下限——`input` 防缩到 0，`textarea` 固定横向只让纵向长，`select` 跟着最长选项走。
+
+```css
+input    { field-sizing: content; width: auto; min-inline-size: 15ch; max-inline-size: 50ch; }
+textarea { field-sizing: content; height: auto; width: 100%; min-block-size: 3lh; max-block-size: 10lh; }
+select   { field-sizing: content; max-inline-size: 50ch; }
+```
+
+### 2.2 收短信验证码（sms-otp-form）
+
+**不加这一步会看到什么**：为了「好看」把 6 位验证码拆成 6 个输入框。结果系统自动填充只填第一格、粘贴只进一格、读屏要念六遍、Tab 要停六次，用户复制了整串还得逐个敲。
+
+**这段在演示什么**：一个输入框收完整验证码——`type="text"` + `inputmode="numeric"` + `autocomplete="one-time-code"`，分段观感靠等宽字体和字距，不拆 DOM。
+
+```html
+<label for="otp">短信验证码</label>
+<input id="otp" name="otp" type="text" inputmode="numeric"
+       autocomplete="one-time-code" maxlength="6" pattern="\d{6}" required>
+```
+
+**这段在演示什么**：支持 WebOTP 的 Android 浏览器可以直接读短信并提交。关键是那个 `AbortController`——`get()` 是长期挂起的 Promise，不主动中断会一直等下去。
+
+```js
+const ac = new AbortController();
+form.addEventListener('submit', () => ac.abort(), { once: true });
+if ('OTPCredential' in window) {
+  const otp = await navigator.credentials.get({ otp: { transport: ['sms'] }, signal: ac.signal });
+  input.value = otp.code;
+  form.requestSubmit(); // 走正常提交；form.submit() 会绕过校验与监听
+}
+```
+
+后端发短信时，**最后一行**必须写成 `@example.com #123456`（没有 scheme、端口、路径），浏览器才认定这个验证码属于本站。OTP 是可能带前导零的标识串，同样禁用 `type="number"`。重发验证码时要重新 `get()`，提交、重发、组件卸载时都要 `abort()`。
+
+**对比**：
+
+| 维度 | 老写法（六个格子） | 现代写法（单输入框） |
+| --- | --- | --- |
+| 自动填充 | 系统只能填第一格 | 整串一次填入 |
+| 粘贴 | 只进一格，剩下五位手输 | 一次粘贴 6 位 |
+| 读屏与 Tab | 六个焦点，念六遍 | 一个字段，一次读完 |
+| 分段观感 | 靠拆 DOM | `letter-spacing` 实现 |
+| 验证码识别 | 浏览器认不出 | `one-time-code` + WebOTP |
+
+动手试试：输入框只接受数字，粘贴一整串会自动截断到 6 位；它始终是**一个** DOM 节点——用 Tab 走一遍，只会停一次。
+
+```jsx playground
+import { useState } from 'react';
+
+export default function App() {
+  const [code, setCode] = useState('');
+  return (
+    <div className="pg-otp">
+      <label htmlFor="otp">短信验证码</label>
+      <input
+        id="otp"
+        type="text"
+        inputMode="numeric"
+        autoComplete="one-time-code"
+        maxLength={6}
+        value={code}
+        onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+        placeholder="000000"
+      />
+      <p>{code.length === 6 ? '格式完整，可以提交' : `还差 ${6 - code.length} 位`}</p>
+      <style>{`
+        .pg-otp { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 8px; max-inline-size: 300px; }
+        .pg-otp input {
+          font: 600 26px/1 ui-monospace, monospace; letter-spacing: .5em;
+          padding: 12px 10px; border: 2px solid #c8ccd4; border-radius: 10px; text-align: center;
+        }
+        .pg-otp input:focus { border-color: #3b82f6; outline: none; }
+        .pg-otp p { margin: 0; color: #5b6472; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 2.3 品牌化，但别把控件重画一遍（brand-consistent-forms）
+
+**不加这一步会看到什么**：设计稿要求 checkbox、单选、滑杆、文件按钮都带品牌色。团队的第一反应是引入组件库或用 `div` 全自绘，然后键盘 Tab 不工作、读屏念不出状态、移动端下拉变成一坨自己实现的浮层，还背上了永久维护成本。
+
+**先问一句：我要改的是颜色，还是形状？** 只改颜色，一级就够；必须改形状才进二级；只有需要往选项里放图片 / 多列布局，才进三级。**能停在低级就停。**
+
+**这段在演示什么**：一级——一行 `accent-color` 把品牌色注入复选框、单选框、滑杆、进度条；渲染、键盘、校验、高对比度全部还是浏览器的。
+
+```css
+:root {
+  --brand-color: #6200ee;
+  color-scheme: light dark;      /* 让 UA 控件自动跟随明暗 */
+  accent-color: var(--brand-color);
+}
+@media (prefers-color-scheme: dark) {
+  :root { --brand-color: #bb86fc; } /* 暗色下提亮，保证对比度 */
+}
+```
+
+动手试试：点色块换品牌色，下面的 checkbox、radio、range 会一起变——它们没有一行自绘代码。
+
+```jsx playground
+import { useState } from 'react';
+
+export default function App() {
+  const [brand, setBrand] = useState('#6200ee');
+  return (
+    <div className="pg-ac" style={{ '--brand': brand }}>
+      <div className="pg-ac-row">
+        {['#6200ee', '#0f9d58', '#e8710a'].map((c) => (
+          <button key={c} className="pg-ac-dot" style={{ background: c }} onClick={() => setBrand(c)} aria-label={`品牌色 ${c}`} />
+        ))}
+      </div>
+      <label className="pg-ac-item"><input type="checkbox" defaultChecked /> 记住我</label>
+      <label className="pg-ac-item"><input type="radio" name="pg-plan" defaultChecked /> 月付</label>
+      <label className="pg-ac-item"><input type="radio" name="pg-plan" /> 年付</label>
+      <input className="pg-ac-range" type="range" defaultValue="60" />
+      <style>{`
+        .pg-ac { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 10px; max-inline-size: 300px; accent-color: var(--brand); }
+        .pg-ac-row { display: flex; gap: 8px; }
+        .pg-ac-dot { inline-size: 22px; block-size: 22px; border: 0; border-radius: 50%; cursor: pointer; }
+        .pg-ac-item { display: flex; gap: 8px; align-items: center; }
+        .pg-ac-range { inline-size: 100%; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+**这段在演示什么**：二级的两条常见需求——把文件选择按钮改成品牌按钮（`::file-selector-button`），以及必须改形状时的自绘复选框。注意文件输入**只改按钮**，点开仍然是系统选择器。
+
+```css
+/* 只染按钮，不改 input 本身：键盘、拖放、系统对话框全部保留 */
+input[type="file"]::file-selector-button {
+  font: inherit; margin-inline-end: 12px;
+  padding: 8px 14px; border: 0; border-radius: 8px;
+  background: var(--brand-color); color: #fff; cursor: pointer;
+}
+
+/* 自绘 checkbox：保留 input 本身，用伪元素画勾 */
+.checkbox-custom {
+  appearance: none;                       /* 只清外观，不清身份 */
+  display: inline-grid; place-content: center;
+  inline-size: 1.25em; aspect-ratio: 1;   /* 清掉默认尺寸后必须显式给 */
+  border: 2px solid currentColor; cursor: pointer;
+}
+.checkbox-custom::before {
+  content: ""; inline-size: .7em; aspect-ratio: 1; scale: 0;
+  background: currentColor; mask: var(--icon-check) no-repeat center / contain;
+}
+.checkbox-custom:is(:checked, :indeterminate)::before { scale: 1; }
+.checkbox-custom:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+```
+
+进了二级就要自己担责任：`:focus-visible` 焦点环不能删、命中区域至少 44×44px、`:indeterminate` 只能由 JS 设置且视觉要和选中区分、`forced-colors` 下改用系统色。滑杆同理，WebKit 和 Firefox 的轨道 / 滑块是两套伪元素，**绝不能写进同一个逗号列表**——不认识的 vendor 伪元素会让整条规则失效。
+
+**这段在演示什么**：三级——`select` 需要用富媒体选项（rich-media-picker）时，`appearance: base-select` 要同时应用到 `select` 和 `::picker(select)`，两处都 opt-in 才生效，键盘导航和表单提交仍然由浏览器负责。
+
+```css
+select.custom-select,
+select.custom-select::picker(select) { appearance: base-select; }
+
+select.custom-select::picker(select) {
+  width: anchor-size(width);            /* 列表与触发按钮同宽 */
+  border: 1px solid #334155; border-radius: 8px; padding: 8px;
+}
+select.custom-select option { display: flex; align-items: center; gap: 12px; padding: 10px; }
+select.custom-select option:checked { background: #eef3ff; color: #1f3b73; font-weight: 600; }
+```
+
+**对比**：
+
+| 维度 | 老写法（自绘组件 / 组件库） | 现代写法（原生 + 分级品牌化） |
+| --- | --- | --- |
+| 键盘与读屏 | 自己实现，容易漏 | 浏览器原生保证 |
+| 代码量 | 一个控件一套状态机 | `accent-color` 一行起步 |
+| 移动端体验 | 自绘 picker 手感差 | 系统 picker / 原生滚动 |
+| 品牌一致性 | 完全可控 | 受浏览器渲染差异限制 |
+| 升级成本 | 跟随组件库版本 | 跟随浏览器 |
+
+其余同级玩法：全面定制选择器外观（branded-select-styling）在 `base-select` 之后接管触发按钮、箭头、勾选符；自定义下拉布局（custom-select-picker-layouts）用 `:open::picker(select)` 排成网格，`:open` 不能省；动画化下拉（animated-select-picker）套 `@starting-style` + `allow-discrete`，并给 `:root` 设 `interpolate-size: allow-keywords` 让高度可过渡。
+
+## 🔴 高阶：边界、性能与降级
+
+### 兼容性地图
+
+| 特性 | Baseline | 不支持时怎么办 |
+| --- | --- | --- |
+| `:user-invalid` / `:user-valid` | Chrome 119、Safari 16.5、Firefox 88（2023-12） | 用 `:invalid` + JS 在失焦 / 提交时加 class |
+| `accent-color` | Chrome 93、Safari 15.4、Firefox 92（2022-07） | 保持 UA 默认色，不要为了颜色整体自绘 |
+| `::file-selector-button` | Chrome 89、Safari 14.1、Firefox 82（2021-07） | 保留默认按钮，图标旁的说明文字照样能改 |
+| `autocomplete="one-time-code"` | Chrome 78、Safari 12、Firefox 72（2021） | 退化为普通输入，仍比六格好粘贴 |
+| WebOTP | 仅 Android 上的 Chromium | 用户手输，不影响主流程 |
+| `field-sizing` | Chrome 123、Safari 26，Firefox 未定（2026） | 固定宽度或用 `size` 属性兜底 |
+| `appearance: base-select` | Chrome 135、Safari 26，Firefox 未定（2026） | 保留原生下拉，只做 `accent-color` 级别的品牌化 |
+| `:autofill` / `:-webkit-autofill` | Widely（WebKit 前缀仍需并列） | 保留默认黄底，不能因为样式回退而阻塞填充 |
+
+### 高对比度与强制配色
+
+**这段在演示什么**：`forced-colors: active` 下浏览器会用自己的系统色板覆盖大部分颜色。硬编码的品牌色在这时会被抹掉，`:focus-visible` 的焦点环也可能消失，所以要么交还外观，要么用系统色自己画。
+
+```css
+@media (forced-colors: active) {
+  .checkbox-custom { appearance: auto; }          /* 复杂自绘直接交还给系统 */
+  .error-msg { color: CanvasText; border-inline-start: 3px solid Mark; }
+  .error-msg::before { content: "⚠"; forced-color-adjust: none; color: Mark; }
+}
+```
+
+机制很简单：开启高对比度后，`background`、`border-color` 等属性被强制替换为 Canvas、CanvasText、LinkText、ButtonText、Highlight、HighlightText、GrayText 这七个系统色。想保住某个装饰色，必须用 `forced-color-adjust: none` 显式豁免，而且**只能用在确实传达信息的元素上**，用多了等于把无障碍设置关掉。
+
+**这段在演示什么**：用 `@supports` 做能力探测，而不是嗅探浏览器版本；同一段代码给两级体验。
+
+```css
+/* 基线：任何浏览器都能用的红框 */
+.field input { border: 2px solid transparent; }
+.field.is-invalid input { border-color: #d93025; }
+
+/* 增强：认伪类的浏览器交给 CSS，JS 只负责 aria-invalid */
+@supports selector(:user-invalid) {
+  .field input:user-invalid { border-color: #d93025; }
+  .field.is-invalid input { border-color: transparent; } /* 关掉 JS 兜底，避免双重来源 */
+}
+```
+
+### 性能：别在每一次按键上重排
+
+**这段在演示什么**：❌ 在 `input` 事件里读 `offsetWidth` 再写样式——强制同步布局，每敲一键触发一次重排；✅ 视觉状态交给伪类，JS 只在提交时读一次。
+
+```js
+/* ❌ 读几何 → 写样式，浏览器被迫立刻重排 */
+input.addEventListener('input', () => {
+  const width = errorEl.offsetWidth;
+  errorEl.style.width = `${width + 10}px`;
+  errorEl.textContent = input.validity.valid ? '' : '格式不对';
+});
+
+/* ✅ 校验状态由浏览器维护，提交时统一处理一次 */
+form.addEventListener('submit', () => {
+  const firstInvalid = form.querySelector(':invalid');
+  if (firstInvalid) firstInvalid.focus(); // 浏览器通常已自动聚焦，这是兜底
+});
+```
+
+**这段在演示什么**：大表单里的受控输入。每个字段用 `useState` 会让整张表单每次按键都重渲染，把状态收在字段自身或用非受控写法，输入延迟能直接降下来。
+
+```js
+// ❌ 一个 state 存 40 个字段：每敲一个字母，40 个受控组件一起重渲染
+const [form, setForm] = useState(initialValues);
+const update = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+
+// ✅ 非受控 + FormData：让 DOM 自己存值，提交时一次读取
+form.addEventListener('submit', (e) => {
+  const data = new FormData(e.currentTarget);
+});
+```
+
+另外两条：跨字段校验（两次密码是否一致）放在提交时或 `focusout` 做，不要绑在每次 `input` 上；自动填充触发的那次 `input` 是程序派发的，`event.isTrusted` 为 `false`，正好可以用来区分「用户输入」和「浏览器填充」。
+
+### 隐私与安全
+
+`autocomplete="off"` 并不拦得住浏览器和密码管理器，现代做法是**用正确的 token 引导它**，再按字段粒度关闭不需要的（如 `autocomplete="off"` 用于一次性的搜索框）。三条红线：不要把卡号、CVC 写进日志或前端埋点；不要把密码预填进 `value` 属性（会进 DOM、进快照、进错误上报）；表单提交必须有 CSRF 防护，前端的 `required` 只是体验，服务端校验才是安全边界。
+
+## 📋 决策速查
+
+| 你想实现 | 用什么 | Baseline | 注意 |
+| --- | --- | --- | --- |
+| 登录 / 密码字段 | `autocomplete="username"` / `current-password` | Widely | 注册用 `new-password` |
+| 结算页一键填卡 | `cc-number` / `cc-exp` / `cc-csc` | Widely | `text` + `inputmode="numeric"` |
+| 接管填充黄底 | `:autofill` + `:-webkit-autofill` | Widely | 用内嵌 box-shadow，不改 border |
+| 交互后才标红 | `:user-invalid` | 2023-12 | 初始干净，修正即消失 |
+| 校验成功反馈 | `:user-valid` | 2023-12 | 别全表单挂绿勾 |
+| 错误文案显隐 | 常驻 DOM + `:user-invalid` 显示 | 2023-12 | 不要靠 `display:none` 删内容 |
+| 中文输入回车提交 | `isComposing` + `keyCode === 229` | Widely | Shift+Enter 放行换行 |
+| 短信验证码 | 单框 + `one-time-code` | Widely | 不要拆六格 |
+| 移动端读短信 | WebOTP + `AbortController` | Android only | 短信末行 `@domain #code` |
+| checkbox / radio / range 品牌色 | `accent-color` | 2022-07 | 一行搞定，别自绘 |
+| 文件按钮品牌化 | `::file-selector-button` | 2021-07 | 系统选择器保持不变 |
+| 高对比度适配 | `forced-colors` 媒体查询 | Widely | 优先交还 `appearance: auto` |
+
+**这段在演示什么**：可以直接抄走的表单骨架——语义、token、报错时机三件事一次写全。
+
+```html
+<form action="/signup" method="POST" novalidate>
+  <label for="mail">邮箱</label>
+  <input id="mail" name="email" type="email" autocomplete="email" required>
+  <p class="error-msg" id="mail-err">请输入有效的邮箱地址</p>
+  <button type="submit">注册</button>
+</form>
+```
+
+**这段在演示什么**：用一小段 JS 把 CSS 的视觉态同步进可访问性树——伪类改得了颜色，改不了 `aria-invalid`。
+
+```js
+const field = form.querySelector('#mail');
+const sync = () => field.setAttribute('aria-invalid', String(field.matches(':user-invalid')));
+field.addEventListener('blur', sync);
+form.addEventListener('submit', sync); // 提交被拦时也同步一次
+```
+
+## ⚠️ 五个常见坑
+
+1. **用 `:invalid` 做实时红框**。首帧就命中，等于告诉用户「你还没填就已经错了」；换成 `:user-invalid`，并用 JS 只同步 `aria-invalid`。
+2. **数字字段一律 `type="number"`**。卡号、验证码、邮编这类标识串会被剥掉前导零、被滚轮误改、还能输入 `e`；它们应该用 `type="text"` + `inputmode="numeric"`。
+3. **验证码拆成六个格子**。自动填充、粘贴、读屏、Tab 全部受损，换来的只是视觉分段——用 `letter-spacing` 一样能做出分段感。
+4. **`keydown` 里只看 `key === 'Enter'`**。中文输入法选词那一下会被误判成提交；必须加 `isComposing`，并用 `keyCode === 229` 兜底老 Safari。
+5. **界面上「撤销 / 显示密码 / 关闭」这类按钮漏写 `type="button"`**。它们默认是 `submit`，用户一点就把表单发了；同理，`label` 漏写 `for` 会让点击标签失效、读屏丢名字。
+
+## ✅ 自测三问
+
+1. 为什么 `:user-invalid` 在页面刚打开时不命中，而点过一次提交后又会命中？（答案：它额外要求浏览器记录的「用户已交互 / 已尝试提交」状态；提交被拦截时浏览器会把这些字段标成已交互。）
+2. 卡号输入框为什么不用 `type="number"`？用 `type="text"` 之后如何拿到数字键盘？（答案：`number` 会丢前导零、加步进、滚轮误改；用 `inputmode="numeric"` 触发数字键盘。）
+3. 中文输入法里按 Enter 选词，`keydown` 已经先于 `compositionend` 触发、`isComposing` 也可靠吗？不可靠时用什么兜底？（答案：老 Safari 顺序会反过来，用 `keyCode === 229` 兜底。）
+
+## 关键要点
+
+1. **先让浏览器认识表单**：`form` 容器、`label` 关联、`name`、`autocomplete` token 四件套；`type="button"` 显式声明非提交按钮，隐式回车提交才有确定行为。
+2. **校验时机比校验规则更影响体验**：`@supports selector(:user-invalid)` 升级、`:invalid` + JS class 兜底；错误文案常驻 DOM，JS 只同步 `aria-invalid`、`aria-describedby`。
+3. **自动填充是字典匹配**：卡、地址、密码、验证码各有一组 token；数字标识串一律 `text` + `inputmode="numeric"`；`:autofill` 用内嵌 box-shadow 接管样式，切换时零位移。
+4. **IME 安全是所有自定义 Enter 的前置条件**：`isComposing || keyCode === 229` 放行，`Shift+Enter` 换行，提交一律走 `requestSubmit()`。
+5. **品牌化分三级、能停就停**：`accent-color` → `::file-selector-button` / `appearance: none` 自绘 → `appearance: base-select`；进了二级必须自己补焦点环、44px 命中区、`forced-colors` 适配和 `indeterminate` 状态。
+
+## 延伸阅读
+
+- [MDN：HTML 表单与输入指南](https://developer.mozilla.org/zh-CN/docs/Learn/Forms)
+- [MDN：autocomplete 属性](https://developer.mozilla.org/zh-CN/docs/Web/HTML/Attributes/autocomplete)
+- [MDN：:user-invalid](https://developer.mozilla.org/zh-CN/docs/Web/CSS/:user-invalid)
+- [web.dev：Sign-in form best practices](https://web.dev/articles/sign-in-form-best-practices)
+- [MDN：WebOTP API](https://developer.mozilla.org/en-US/docs/Web/API/WebOTP_API)
+
+---
+
+← 上一章：[03 动效与视图过渡](/web/03-motion-view-transitions) ｜ 下一章：[05 组件与 UX 模式](/web/05-components-ux)
+

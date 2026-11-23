@@ -2,38 +2,26 @@
 pageType: home
 
 hero:
-  name: 音视频技术学习之路
-  text: 从浅入深掌握音视频概念与协议
-  tagline: 只学概念、理论与协议：流媒体、RTC、QUIC —— 不深陷编解码细节
+  name: RTC × 现代前端 学习之路
+  text: 音视频协议与最新 Web 平台实践
+  tagline: 两大部分：RTC 音视频概念与协议（不学编解码） · 前端最新实现与最佳实践
   actions:
     - theme: brand
-      text: 开始学习
-      link: /roadmap/
+      text: RTC 学习
+      link: /rtc/
     - theme: alt
-      text: 阶段一：基础概念
-      link: /roadmap/stage-1/
+      text: 前端最新实现
+      link: /web/
   image:
     src: /rspress-icon.png
     alt: Logo
 features:
-  - title: 阶段一 · 基础概念与理论
-    details: 采样量化、封装容器、时延谱系、QoS/QoE —— 建立音视频全景认知，约 3 周。
-    icon: 🎬
-    link: /roadmap/stage-1/
-  - title: 阶段二 · 流媒体与传输协议
-    details: RTMP、HLS、DASH、RTSP/RTP、SRT —— 看懂直播链路的每一环，约 4 周。
+  - title: RTC 学习
+    details: 五个阶段约 18 周：音视频基础概念 → 流媒体与传输协议 → RTC 与 WebRTC 核心 → QUIC 与新一代传输 → 综合串联。每个阶段含知识整理、清单打卡与动手实践。
     icon: 📡
-    link: /roadmap/stage-2/
-  - title: 阶段三 · RTC 与 WebRTC 核心
-    details: SDP、ICE/STUN/TURN、DTLS-SRTP、SFU 架构 —— 打通实时互动全栈概念，约 5 周。
-    icon: 📞
-    link: /roadmap/stage-3/
-  - title: 阶段四 · QUIC 与新一代传输
-    details: QUIC、HTTP/3、WebTransport、MoQ —— 面向未来的音视频传输协议，约 4 周。
+    link: /rtc/
+  - title: 前端最新实现
+    details: 基于 modern-web-guidance 指南库的现代 Web 平台最佳实践：HTML 原生交互、CSS 布局与响应式、动效与视图过渡、表单、组件模式、无障碍、性能、安全、Web Components 与内置 AI。
     icon: ⚡
-    link: /roadmap/stage-4
-  - title: 阶段五 · 综合串联与进阶
-    details: 全链路时延分析、QoE 指标体系、输出全景图收官，约 2 周。
-    icon: 🧭
-    link: /roadmap/stage-5
+    link: /web/
 ---

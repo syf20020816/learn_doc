@@ -1,0 +1,403 @@
+---
+title: 00 · CSS @规则（At‑rules）手册
+description: 从单个 dialog 到声明式 popover、commandfor 指挥弹窗、interestfor 悬停预览——把弹窗最脏的五件事交还给浏览器。
+---
+
+# CSS @规则（At‑rules）手册
+
+> 
+> 分类整理｜用途 + 语法示例 + 兼容性说明｜包含你前面问的 `@supports / @container / @layout`
+> 区分：✅稳定生产可用 / ⚠️现代可用（需要新版浏览器） / 🚧实验草案（flag / WIP）
+
+## 目录
+
+1. 导入与元信息类
+2. 条件查询类（你重点关心这一组）
+3. 动画与自定义属性类
+4. 层叠、作用域类
+5. 字体、列表、颜色配置类
+6. 分页打印类
+7. Houdini 实验类
+8. 新特性草案类
+9. 速查总表
+
+---
+
+## 1. 导入与元信息类
+
+### @charset
+
+作用：指定样式表文件编码，**必须写在CSS最顶部**，前面不能有任何字符
+
+```
+@charset "utf-8";
+```
+
+✅ 稳定，现在很少手写
+
+### @import
+
+作用：引入外部 CSS 文件；支持媒体查询、layer、supports
+
+> 
+> ⚠️ 限制：必须放在所有样式规则之前
+
+```
+@import url("./reset.css");
+@import url("./mobile.css") screen and (max-width:768px);
+@import url("./dark.css") layer(dark);
+```
+
+✅ 稳定
+
+### @namespace
+
+作用：给 XML / SVG 命名空间，区分同名选择器，业务开发极少用
+
+```
+@namespace svg url("[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)");
+svg|rect { fill: red; }
+```
+
+✅ 稳定
+
+---
+
+## 2. 条件查询类（重点）
+
+### @media 媒体查询
+
+依据：视口、设备、屏幕类型
+
+```
+@media screen and (max-width:768px) {
+  .box { width:100%; }
+}
+```
+
+✅ 稳定
+
+### @supports 特性查询
+
+依据：浏览器是否支持某个CSS属性/选择器
+
+```
+@supports (backdrop-filter: blur(8px)) {
+  .glass { backdrop-filter: blur(8px); }
+}
+@supports selector(:has(.child)) {
+  .parent:has(.child) {}
+}
+```
+
+✅ 稳定
+
+### @container 容器查询
+
+依据：父容器尺寸（组件响应式，而不是视口）
+
+```
+.wrap {
+  container: card / inline-size;
+}
+@container card (min-width:400px) {
+  .card { display:flex; }
+}
+```
+
+⚠️ 现代可用（Chrome105+, FF110+, Safari16+）
+
+### @when（条件合并草案）
+
+可以把 media / supports / container 写在同一个条件块，替代嵌套
+
+```
+@when media(width >=768px) and supports(display:grid) {
+  .box {}
+}
+```
+
+🚧 草案
+
+---
+
+## 3. 动画 & 自定义属性
+
+### @keyframes 关键帧动画
+
+```
+@keyframes fadeIn {
+  from { opacity:0; }
+  to { opacity:1; }
+}
+.fade { animation: fadeIn 0.3s; }
+```
+
+✅ 稳定
+
+### @property 注册类型化 CSS 变量（Houdini）
+
+让 CSS 变量拥有类型、可过渡动画
+
+```
+@property --rotate {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+.box { transition: --rotate 1s; }
+```
+
+⚠️ 现代可用
+
+### @starting-style
+
+元素第一次渲染入场时的过渡起始值，解决display: none 入场动画
+
+```
+.pop {
+  transition: opacity 0.3s;
+  opacity:1;
+  @starting-style {
+    opacity:0;
+  }
+}
+```
+
+⚠️ 现代可用
+
+---
+
+## 4. 层叠、作用域类（现代CSS重磅）
+
+### @layer 层叠层
+
+控制样式优先级顺序，解决权重冲突，后声明的层优先级更高
+
+```
+@layer base, components, utils;
+@layer base {
+  p { margin:0; }
+}
+@layer components {
+  .card {}
+}
+```
+
+⚠️ 现代可用
+
+### @scope 样式作用域
+
+限定选择器只在指定范围内生效，类似简易CSS隔离
+
+```
+@scope (.card) {
+  h2 { color:#333; } /* 只匹配 .card 内部 h2 */
+}
+@scope (.card) to (.ignore) {
+  /* 到 .ignore 为止，不包含它 */
+}
+```
+
+⚠️ 现代可用
+
+---
+
+## 5. 字体、列表、颜色配置类
+
+### @font-face 自定义字体
+
+```
+@font-face {
+  font-family: "MyFont";
+  src: url("./myfont.woff2") format("woff2");
+  font-weight: 400;
+}
+```
+
+✅ 稳定
+
+### @font-feature-values
+
+给字体特性起别名，方便 font-variant 使用
+
+```
+@font-feature-values MyFont {
+  @styleset { ss: 12; }
+}
+```
+
+✅ 稳定
+
+### @font-palette-values（COLRv1彩色字体）
+
+自定义彩色字体调色板
+
+```
+@font-palette-values --pal {
+  font-family: "ColorFont";
+  base-palette: 0;
+}
+```
+
+⚠️ 现代可用
+
+### @counter-style 自定义列表标记
+
+自定义 list-style-type，造自己的项目符号
+
+```
+@counter-style circled-digits {
+  system: fixed;
+  symbols: ⓐ ⓑ ⓒ;
+  suffix: " ";
+}
+ul { list-style: circled-digits; }
+```
+
+✅ 稳定
+
+### @color-profile
+
+定义ICC颜色配置文件，色彩管理、印刷场景
+
+```
+@color-profile --cmyk {
+  src: url("cmyk.icc");
+}
+```
+
+🚧 有限支持
+
+---
+
+## 6. 分页打印类（打印PDF、打印页面）
+
+### @page
+
+控制打印分页、页边距、页眉页脚
+
+```
+@page {
+  size: A4;
+  margin: 2cm;
+}
+@page :first {
+  margin-top: 4cm;
+}
+```
+
+✅ 稳定（打印场景）
+
+### @top-center / @bottom-left 等是 margin at‑rules，写在 @page 内部
+
+```
+@page {
+  @top-center { content: "文档标题"; }
+}
+```
+
+---
+
+## 7. Houdini Worklet 实验类（你前面问的 @layout）
+
+> 
+> Houdini 体系，需要 Worklet，大多需要 Chrome flag，业务慎用
+
+### @layout（Layout Worklet）
+
+自定义布局算法（瀑布流、环形布局）
+
+```
+.wrap {
+  @layout masonry;
+}
+```
+
+🚧 草案
+
+### @paint（Paint Worklet）
+
+自定义绘制背景，替代复杂渐变
+
+```
+.box {
+  background: paint(dotPattern);
+}
+```
+
+🚧 草案
+
+### @scroll-timeline（滚动时间线动画）
+
+滚动驱动动画（现在新版规范已经迁移到 `animation-timeline`，@scroll-timeline 旧写法）
+
+```
+@scroll-timeline scrollTL {
+  source: selector(#scrollContainer);
+  time-range: 1s;
+}
+```
+
+🚧 废弃/迁移
+
+---
+
+## 8. 锚点定位新特性
+
+### @position-try
+
+锚点定位 `anchor()` 的备选位置策略，弹出框自动避让视口
+
+```
+@position-try --popover-try {
+  position-area: bottom span-left;
+}
+.pop {
+  position-try-options: --popover-try;
+}
+```
+
+⚠️ 现代可用
+
+---
+
+## 9. 废弃 / 预处理器专属（不是原生CSS）
+
+> 
+> 注意区分：下面这些 **不是浏览器原生CSS**，是 Sass/Less
+
+- `@mixin` / `@include`
+- `@function` / `@return`
+- `@extend`
+- `@use` / `@forward`
+- `@if` / `@for` / `@each`
+
+---
+
+# 📋 总速查表
+
+| @规则 | 分类 | 核心作用 | 生产推荐 |
+| --- | --- | --- | --- |
+| @charset | 元信息 | 样式表编码 | ✅ |
+| @import | 导入 | 引入外部样式 | ✅ |
+| @namespace | 命名空间 | XML/SVG命名空间 | ✅ |
+| @media | 条件 | 视口/设备媒体查询 | ✅ |
+| @supports | 条件 | CSS特性检测 | ✅ |
+| @container | 条件 | 容器尺寸查询 | ⚠️ |
+| @when | 条件 | 多条件合并 | 🚧 |
+| @keyframes | 动画 | 动画关键帧 | ✅ |
+| @property | 自定义属性 | 类型化变量，支持过渡 | ⚠️ |
+| @starting-style | 动画 | 首次入场过渡 | ⚠️ |
+| @layer | 层叠 | 控制样式优先级 | ⚠️ |
+| @scope | 作用域 | 局部样式隔离 | ⚠️ |
+| @font-face | 字体 | 加载自定义字体 | ✅ |
+| @font-feature-values | 字体 | 字体特性别名 | ✅ |
+| @font-palette-values | 字体 | 彩色字体调色板 | ⚠️ |
+| @counter-style | 列表 | 自定义项目符号 | ✅ |
+| @color-profile | 色彩 | ICC色彩配置 | 🚧 |
+| @page | 打印 | 分页打印设置 | ✅ |
+| @position-try | 定位 | 锚点定位备选策略 | ⚠️ |
+| @layout | Houdini | JS自定义布局 | 🚧 |
+| @paint | Houdini | JS自定义绘制 | 🚧 |
+

@@ -1,0 +1,650 @@
+---
+title: 03 · 动效与视图过渡
+description: 从「只能动能插值的属性」一路走到 View Transitions、滚动驱动动画与手势——每一步都讲清不加它会看到什么，以及和老写法差在哪。
+---
+
+# 第 3 章 动效与视图过渡
+
+> **难度**：🟡 进阶 ｜ **前置**：[01 HTML 与原生交互](/web/01-html-interactive)、[02 CSS 布局与响应式](/web/02-css-layout-responsive) ｜ **学完你能**：不装动画库，用 CSS 加几行 JS 做出元素进出场、列表共享元素、整页转场和滚动动画，并且说得出每一步为什么这么做。
+
+**这一章要解决的毛病**
+
+- 弹窗、提示条、下拉面板「啪」地蹦出来，关掉时又瞬间消失，看起来像没做完。
+- 从列表点进详情，缩略图「闪」一下就到了新位置，用户眼睛跟不上，也不知道自己点的是哪一条。
+- 想做滚动动画只能监听 `scroll` 手算 `transform`，一快就卡；想写个轮播，手指还没松手，下面的小圆点毫无反应。
+
+## 🟢 入门：先让它跑起来
+
+入门只回答三个问题：动哪个属性最便宜、元素「从无到有」怎么动、曲线怎么才像真的。这三件事全部由 CSS 完成，一行 JS 都不用。先跑通，再谈场景。
+
+### 1.1 只动能插值的属性（motion）
+
+**没它会怎样**：你给 `left` 和 `width` 加过渡，在开发机上看着还行，一到中低端手机就掉帧；更糟的是元素改尺寸会挤动周围内容，旁边的文字跟着一起跳。还有人想给 `height: auto` 加过渡，结果发现根本没有动画——属性没选对，写法再多也没用。
+
+**这段在演示什么**：同一个侧边面板滑入，老写法改 `left`（触发布局），现代写法改 `translate`（只走合成），外加 `opacity` 让边缘不突。
+
+```css
+/* ❌ 老写法：改 left，每一帧都要重新算布局、重绘、再合成 */
+.panel { position: absolute; left: 0; opacity: .6; transition: left .3s ease, opacity .3s ease; }
+.panel.is-open { left: 240px; opacity: 1; }
+
+/* ✅ 现代写法：translate 与 opacity 都能交给合成器线程 */
+.panel { position: absolute; translate: 0 0; opacity: .6; transition: translate .3s ease, opacity .3s ease; }
+.panel.is-open { translate: 240px 0; opacity: 1; }
+```
+
+**浏览器做了什么**：渲染一帧要经过 layout（算位置和尺寸）→ paint（画像素）→ composite（把图层合成到屏幕）三步。改 `left` 会让三步全部重来，而且跑在主线程上，主线程一忙（正在处理点击逻辑）动画就掉帧。`translate` 和 `scale` 是独立的变换属性，浏览器可以把元素提到自己的合成层，动画交给合成器线程，主线程卡住它也能继续跑。
+
+**为什么 `height: auto` 动不了**：过渡的本质是「在两个数值之间逐帧取值」。`auto` 是一个关键字而不是数字，浏览器不知道第 30% 的时候应该是多少像素，于是干脆不插值、直接跳到终点。`display` 更彻底，它是离散属性，只有「是 / 否」两个值，中间没有过渡空间。
+
+**这段在演示什么**：折叠面板的三种写法——直接动 `height: auto`（失败）、用 `grid-template-rows` 的 `0fr → 1fr`（经典解法）、用 `interpolate-size` 让 `auto` 也能插值（新解法）。
+
+```css
+/* ❌ 终点是 auto，浏览器无值可插，展开时是瞬间跳变 */
+.fold { height: 0; overflow: hidden; transition: height .3s ease; }
+.fold.is-open { height: auto; }
+
+/* ✅ 方案一：0fr → 1fr 都是数字，天然可插值，且不依赖新特性 */
+.fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .3s ease; }
+.fold > .fold-inner { overflow: hidden; }
+.fold.is-open { grid-template-rows: 1fr; }
+
+/* ✅ 方案二：显式允许关键字参与插值，之后 height: auto 也能动 */
+:root { interpolate-size: allow-keywords; }
+.fold { height: 0; transition: height .3s ease; }
+.fold.is-open { height: auto; }
+```
+
+**对比**：
+
+| 维度 | 老写法（`left` / `width` / `height: auto`） | 现代写法（`translate` / `scale` / `1fr`） |
+| --- | --- | --- |
+| 触发的流水线 | layout → paint → composite | 只走 composite |
+| 谁在跑动画 | 主线程，和业务 JS 抢时间 | 合成器线程，独立调度 |
+| 对周围元素的影响 | 改尺寸会挤动兄弟节点 | 完全不影响布局 |
+| 能否插值 | `auto` 不是数值，动不起来 | 数值对数值，逐帧平滑 |
+| 代码量 | 常要 JS 读几何、算差值 | 一行 CSS 属性 |
+
+### 1.2 元素「从无到有」也要有动画（animate-element-entry-exit）
+
+**没它会怎样**：给一个 `display: none` 的提示条加上 `transition: opacity .3s`，再把它显示出来——它还是瞬间出现。因为元素在「显示」那一帧之前根本不存在，浏览器找不到上一帧的值可以插值。于是团队开始写 JS：先渲染、强推一次 reflow、再加 class，退出时加 `closing` class、等 `animationend`、删节点——一旦动画被打断，节点就永远删不掉。
+
+**这段在演示什么**：用 `@starting-style` 告诉浏览器「元素刚出现时该长什么样」，用 `transition-behavior: allow-discrete` 让 `display` 也参与过渡，进出场各一句话，不需要任何定时器。
+
+```css
+.toast {
+  opacity: 1;
+  translate: 0 0;
+  transition: display .3s, opacity .3s, translate .3s ease-out;
+  transition-behavior: allow-discrete; /* 独占一行，写进 shorthand 会被老浏览器整条丢弃 */
+}
+@starting-style {
+  .toast { opacity: 0; translate: 0 -12px; } /* 出现那一帧的起点 */
+}
+.toast[hidden] {
+  display: none;
+  opacity: 0;
+  translate: 0 -12px; /* 退出终点 */
+}
+```
+
+**浏览器做了什么**：显示元素时，浏览器发现有 `transition` 且存在 `@starting-style` 规则，就先按起点样式插一帧，再过渡到当前样式。所以 `@starting-style` 只管「进入」，退出终点必须写在目标状态里（这里是 `[hidden]`）。`display` 是离散属性，默认在过渡开始的瞬间就切换；`allow-discrete` 让它反过来——变成 `none` 时保持可见直到动画结束，从 `none` 变成别的值时立刻生效。这正是「退场能看见」的关键。
+
+**这段在演示什么**：同样的写法用在顶层元素上。`<dialog>` 和 `[popover]` 被提升到 top-layer，退场时浏览器会先把它移出顶层，动画就看不见了，所以过渡列表里还得加上 `overlay`。
+
+```css
+dialog.panel {
+  opacity: 1;
+  translate: 0 0;
+  transition: opacity .3s, translate .3s, display .3s, overlay .3s;
+  transition-behavior: allow-discrete;
+}
+@starting-style {
+  dialog.panel[open] { opacity: 0; translate: 0 12px; }
+}
+dialog.panel:not([open]) { opacity: 0; translate: 0 12px; }
+```
+
+**对比**：
+
+| 维度 | 老写法（JS 动画库 / 手写 class） | 现代写法（`@starting-style`） |
+| --- | --- | --- |
+| 进入动画 | 先渲染，再强推一次 reflow，再加 class | 声明式给起点，浏览器自己插帧 |
+| 退出动画 | 先加 `closing` class，等 `animationend` 再删节点 | 目标状态写终点，`display` 参与过渡 |
+| 定时器风险 | 动画被打断就永远删不掉 / 关不掉 | 没有定时器，状态即真相 |
+| 代码量 | 每类浮层一套开关函数 | 一次 CSS，所有同类元素复用 |
+
+动手试试：点按钮让提示条进出。再把 `@starting-style` 那两条声明删掉点一次，就能看到「瞬间蹦出来」的原始效果。
+
+```jsx playground
+import { useState } from 'react';
+
+export default function App() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="pg-st">
+      <button className="pg-st-btn" onClick={() => setOpen(!open)}>
+        {open ? '收起提示' : '弹出提示'}
+      </button>
+      <p className="pg-st-tip" hidden={!open}>
+        这条提示是「长」出来的，不是瞬间蹦出来的。
+      </p>
+      <style>{`
+        .pg-st { font: 14px/1.6 system-ui, sans-serif; display: grid; gap: 10px; justify-items: start; }
+        .pg-st-btn {
+          padding: 6px 14px; border-radius: 8px; border: 1px solid #c8ccd4;
+          background: #fff; cursor: pointer;
+        }
+        .pg-st-tip {
+          margin: 0; padding: 10px 14px; border-radius: 10px;
+          background: #eef3ff; color: #1f3b73;
+          opacity: 1; translate: 0 0;
+          transition: display .3s, opacity .3s, translate .3s ease-out;
+          transition-behavior: allow-discrete;
+        }
+        @starting-style {
+          .pg-st-tip { opacity: 0; translate: 0 -10px; }
+        }
+        .pg-st-tip[hidden] { display: none; opacity: 0; translate: 0 -10px; }
+        @media (prefers-reduced-motion: reduce) {
+          .pg-st-tip { transition-duration: 0s; }
+        }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 1.3 缓动不只是 `ease`：用 `linear()` 画弹簧（physics-based-easing）
+
+**没它会怎样**：想让卡片有「弹一下」的手感，`ease-out` 只会减速停下，`cubic-bezier()` 最多做一次轻微过冲，想弹两下就得引入一个 JS 弹簧库——为了一个 hover 效果多打包几十 KB，还得在 `:hover` 里手动调 API。
+
+**这段在演示什么**：`linear()` 接收一串「进度 → 数值」的采样点，浏览器在点之间做线性插值。点给得够密，任何曲线都能逼近，包括会越过终点再回来的弹簧。
+
+```css
+/* ❌ 只能过冲一次，回弹幅度和次数都不可控 */
+.btn { transition: scale .4s cubic-bezier(.2, 1.6, .4, 1); }
+.btn:hover { scale: 1.08; }
+
+/* ✅ 停靠点由弹簧函数生成一次，存成变量全站复用 */
+:root {
+  --spring-easing: linear(0, .016, .063 2.1%, .281 6.7%, .723 12.9%,
+    1.077 20.1%, 1.149 24.3%, 1.154 29.9%, 1.051 39.6%, .991 47.1%,
+    .974 53.8%, 1.003 76.9%, 1);
+}
+.btn { transition: scale .8s ease-out; transition-timing-function: var(--spring-easing); }
+.btn:hover { scale: 1.08; }
+```
+
+**浏览器做了什么**：`linear()` 是时序函数，不是动画本身——它只负责把「时间进度 0 到 1」映射成「数值 0 到 1.15 再回到 1」。所以它必须配一个显式的 `duration`；它也不从质量、刚度这些物理量推导任何东西，手感完全取决于你给的那串数字。回弹曲线不要用在 `opacity` 上，数值越过 1 会被截断，看起来就是闪一下。
+
+**对比**：
+
+| 维度 | 老写法（JS 动画库的 spring） | 现代写法（CSS `linear()`） |
+| --- | --- | --- |
+| 依赖 | 引入库，JS 每帧写样式 | 纯 CSS，零运行时 |
+| 与 CSS 状态联动 | 要在 `:hover` 里手动调 API | 直接写在 `transition` 上 |
+| 打断与重入 | 需要库处理中断 | 浏览器天然支持反向过渡 |
+| 曲线复用 | 库的配置对象 | 自定义属性，一处定义全站用 |
+
+想看手感差别，把 1.2 playground 里的 `transition` 换成上面这套缓动再悬停——普通 `ease-out` 是「减速停下」，弹簧是「冲过头再回弹」。
+
+## 🟡 进阶：组合起来解决真实场景
+
+入门那三件事是零件。真实项目里的难点从来不是「怎么写一个动画」，而是「两个画面之间怎么接上」。下面五个场景按「省事的程度」递进：从一个元素飞过去，到整页换掉，再到滚动、吸附和手势——每一步都先说清楚不加它会看到什么。
+
+### 2.1 同文档：列表点进详情，元素「飞」过去（same-document-transitions）
+
+**不加这一步会看到什么**：点击后 DOM 直接替换，缩略图消失、详情大图出现，用户视线断在半空，也分不清自己点的是哪一条。手写 FLIP 能解决，但要读起始矩形、读结束矩形、算差值、设 `transform`、强制 reflow、过渡、清理，四五十行，还得处理图片加载后尺寸变化。
+
+**最小做法**：把「改 DOM」这件事交给 `document.startViewTransition()` 包起来。浏览器在回调执行前给旧状态拍快照，执行后再给新状态拍一张，然后在顶层补间。你只需要用 `view-transition-name` 告诉它「这两个状态里的哪个元素是同一个人」。
+
+**这段在演示什么**：一次视图切换的完整入口——先特性检测，再在回调里改 DOM，最后用 `finished` 接上焦点管理。
+
+```js
+function openDetail(id) {
+  if (!document.startViewTransition) { renderDetail(id); return; } // 不支持就直接换
+  const t = document.startViewTransition(() => renderDetail(id));
+  t.finished.finally(() => document.getElementById('detail-heading')?.focus());
+}
+```
+
+**这段在演示什么**：两边各写一个 `view-transition-name`，把「缩略图」和「详情大图」标成同一个元素；只给被点的那一项命名，避免同名冲突。后三行是「不想用默认交叉淡入」时的写法——分别给 `old` 和 `new` 各写一条动画。
+
+```css
+.thumb.is-active { view-transition-name: hero; } /* 只有被点的那一项有名字 */
+.detail-hero      { view-transition-name: hero; } /* 同一时刻全局只能有一个 hero */
+::view-transition-group(hero) { animation-duration: .35s; }
+::view-transition-old(hero) { animation: .35s ease-in fade-out; }
+::view-transition-new(hero) { animation: .35s cubic-bezier(.2, .8, .2, 1) fade-in; }
+```
+
+**浏览器做了什么**：一次过渡会在顶层生成一棵 `::view-transition` 伪元素树，里面每个命名元素都有 `old`（旧快照）、`new`（新快照）和一个 `group`。`group` 负责从旧矩形补间到新矩形，`old` 与 `new` 两张位图则做交叉淡入。所以连「元素内部文字重排、图片换了尺寸」也一起被补上了——FLIP 只能补矩形，内部照样跳。规则只有一条但极容易踩：**同一个 `view-transition-name` 在过渡前后各只能有一个元素**，出现两个，浏览器检测到重复会跳过整个过渡，页面上看起来像「什么都没发生」，控制台也不报错。
+
+**同一家族的其它做法**：
+
+| 指南 | 现代方案 | 什么时候用 |
+| --- | --- | --- |
+| 组件级过渡（scoped-component-transitions） | 在组件根元素上调用 `element.startViewTransition()`，把 `::view-transition` 覆盖层注入该子树 | 页面其它部分要保持可交互（后台刷新、通知），或同屏多个组件并发过渡 |
+| 组元素过渡（group-element-transitions） | 每项唯一 name + 共享 `view-transition-class`，用 `::view-transition-group(.card)` 统一定义动画 | 整个列表一起进出场，不想逐项写 CSS |
+| 动态排序（dynamic-sort） | 用 `moveBefore()` 移动真实 DOM 节点再配 `match-element`，而不是 `innerHTML` 重建 | 拖拽排序、切换排序方式后列表重排 |
+| SPA 视图切换提速（faster-spa-view-transitions） | 非活跃视图设 `content-visibility: hidden`，保留渲染状态 | 固定 3~5 个标签页来回切；视图数量会涨就必须配淘汰策略 |
+
+`content-visibility: hidden` 是「隐藏但仍缓存」：内容脱离布局流、停止绘制，切回来几乎不用重新布局，用内存换 CPU。`moveBefore()` 则是「移动而不是重建」，焦点、未提交的输入值、iframe、播放中的动画都不重置——节点身份不变，浏览器才认得出是「同一项换了个位置」。
+
+**对比**：
+
+| 维度 | 手写 FLIP | View Transitions |
+| --- | --- | --- |
+| 需要知道的几何 | 起始 / 结束 `getBoundingClientRect()` | 不用，浏览器自己拍快照 |
+| 需要处理的时机 | reflow、`requestAnimationFrame`、清理内联样式 | 回调里只管改 DOM |
+| 内容自身变化 | 只能补矩形，内部会跳 | 整个元素快照一起补间 |
+| 打断处理 | 手写取消上一段动画 | 新过渡自动接管 |
+| 代码量 | 约 30~50 行 / 场景 | 命名 + 一次调用 |
+
+动手试试：点「展开 / 收起」，同一个元素在缩略卡和大卡之间平滑变形；勾掉「启用共享元素」再点，就能看到没有 `view-transition-name` 时的硬切。
+
+```jsx playground
+import { useRef } from 'react';
+
+export default function App() {
+  const cardRef = useRef(null);
+  const wrapRef = useRef(null);
+  const toggle = () => {
+    const flip = () => cardRef.current.classList.toggle('is-open');
+    if (document.startViewTransition) document.startViewTransition(flip);
+    else flip();
+  };
+  const toggleVT = () => wrapRef.current.classList.toggle('is-off');
+  return (
+    <div className="pg-vt" ref={wrapRef}>
+      <div className="pg-vt-actions">
+        <button className="pg-btn" onClick={toggle}>展开 / 收起</button>
+        <label className="pg-vt-check">
+          <input type="checkbox" defaultChecked onChange={toggleVT} />
+          启用共享元素
+        </label>
+      </div>
+      <div className="pg-vt-card" ref={cardRef}>
+        <div className="pg-vt-thumb" />
+        <div className="pg-vt-body">
+          <h4>共享元素过渡</h4>
+          <p>两个状态用同一个 view-transition-name，浏览器自动补间位置与尺寸。</p>
+        </div>
+      </div>
+      <style>{`
+        .pg-vt { font: 14px/1.6 system-ui, sans-serif; }
+        .pg-vt-actions { display: flex; gap: 14px; align-items: center; }
+        .pg-vt-check { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+        .pg-btn { padding: 6px 14px; border-radius: 8px; border: 1px solid #c8ccd4; background: #fff; cursor: pointer; }
+        .pg-vt-card {
+          view-transition-name: card; display: grid; grid-template-columns: 72px 0fr;
+          inline-size: 190px; border-radius: 12px; overflow: hidden;
+          background: #f2f4f8; margin-block-start: 12px;
+        }
+        .pg-vt.is-off .pg-vt-card { view-transition-name: none; }
+        .pg-vt-card.is-open { grid-template-columns: 96px 1fr; gap: 14px; inline-size: 100%; }
+        .pg-vt-thumb { block-size: 72px; background: linear-gradient(135deg, #7c9cff, #b98cff); }
+        .pg-vt-body { opacity: 0; overflow: hidden; }
+        .pg-vt-card.is-open .pg-vt-body { opacity: 1; padding-inline-end: 14px; }
+        ::view-transition-group(card) { animation-duration: .35s; }
+        @media (prefers-reduced-motion: reduce) { ::view-transition-group(card) { animation-duration: 0s; } }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 2.2 跨文档：多页站点也要转场（cross-document-transitions）
+
+**不加这一步会看到什么**：站点是传统 MPA，点链接就是整页刷新，中间一段白屏或闪烁，用户感觉「断了一下」。要抹平这一下，传统答案是把整站改造成 SPA + 客户端路由，代价是首屏、SEO 和一大堆积压问题全都得重做。
+
+**最小做法**：源页面和目标页面的 CSS 里各写一句 `@view-transition { navigation: auto }`。浏览器在导航时自动截旧页快照、加载新页、再补间。没有 JS 调用，没有路由改造。
+
+**这段在演示什么**：用媒体查询把跨文档过渡包起来——接受动效的用户才有转场，敏感用户拿到标准瞬时导航；后两行按导航方向给不同动画，前进从右入、后退从左入，让用户建立「页面有方位」的心智模型。
+
+```css
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition { navigation: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  @view-transition { navigation: none; } /* 敏感用户直接禁用 */
+}
+:active-view-transition-type(next)::view-transition-new(root) { animation-name: slide-in-right; }
+:active-view-transition-type(back)::view-transition-old(root) { animation-name: slide-out-right; }
+```
+
+**为什么这一步值得做**：跨文档过渡是纯 CSS 的渐进增强——不支持的浏览器执行标准瞬时导航，核心功能零影响。但有两个容易忽略的配套：
+
+- **稳定的跨文档过渡（consistent-cross-document-transitions）**：新页面首屏资源还没解析完就开始转场，动画会跑到半成品页面上。解法是在 `head` 里用 `blocking="render"` 加 `rel="expect"` 指向首屏关键元素，让浏览器等它解析完再开始。渲染阻塞总时长超过约 4 秒，浏览器会直接跳过过渡。
+- **方向性导航过渡（directional-navigation-transitions）**：给 `startViewTransition` 传 `types`（跨文档时读 `navigation.activation`），再用 `:active-view-transition-type()` 套不同动画。
+
+**对比**：
+
+| 维度 | 老写法（SPA + 手写路由动画） | 现代写法（跨文档过渡） |
+| --- | --- | --- |
+| 架构要求 | 必须把站点改成客户端路由 | 保留 MPA，两个页面各写一句 CSS |
+| 首屏 | 靠骨架屏遮住切换 | 浏览器原生交叉淡入 |
+| 方向动画 | 路由层根据 history 判断 | 导航类型 + 伪类 |
+| 不支持时 | 路由动画直接失效 | 退化为普通跳转，无副作用 |
+
+### 2.3 滚动驱动动画（scroll-driven animations）
+
+**不加这一步会看到什么**：一个长页面，卡片滚进视口时放大、滚出时缩小，顶部还有一条阅读进度条。传统写法要监听 `scroll`、在回调里读 `getBoundingClientRect()`、写 `transform`、再配节流——滚动一快就掉帧，首屏还要等 JS 初始化才有动画，刷新时能看见「先静止、后突然开始动」。
+
+**最小做法**：把动画的时间线从「时间」换成「滚动位置」。`animation-timeline: view()` 用元素自身在滚动容器里的可见进度驱动动画；`animation-timeline: scroll()` 用滚动容器的整体滚动距离驱动动画。零 JS 监听，首帧就是正确状态。
+
+**这段在演示什么**：卡片进入视口播进入动画、离开时播退出动画。两条 keyframes 各管一头，用 `animation-range` 把「进入」和「离开」两段区间截出来。
+
+```css
+@media (prefers-reduced-motion: no-preference) {
+  /* 探测必须带上 animation-range，过滤掉只支持一半的浏览器 */
+  @supports ((animation-timeline: view()) and (animation-range: entry)) {
+    @keyframes grow   { from { scale: .6; opacity: 0; } }
+    @keyframes shrink { to   { scale: .6; opacity: 0; } }
+    .scroller > * {
+      animation: grow auto linear backwards, shrink auto linear forwards;
+      animation-timeline: view(block);
+      animation-range: entry, exit; /* 进入视口播进入，离开播退出 */
+    }
+  }
+}
+```
+
+**这段在演示什么**：顶部阅读进度条。它监听的是整个页面的滚动进度，用 `scaleX` 而不是 `width`，因为缩放只走合成。
+
+```css
+@keyframes grow-progress { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+#progress {
+  position: fixed; inset-block-start: 0; inset-inline: 0; block-size: 4px;
+  transform-origin: 0 50%;
+  background: #3b82f6;
+  animation: grow-progress auto linear;
+  animation-timeline: scroll(); /* 最近祖先滚动容器，这里就是页面根滚动器 */
+}
+```
+
+**浏览器做了什么**：滚动时间线本质上把「keyframes 的进度」接到了「滚动位置的百分比」上。`scroll()` 的 0% 是滚动起点、100% 是滚动终点；`view()` 的 0% 是元素刚要从视口边缘进入、100% 是完全离开。`animation-range: entry, exit` 则进一步把这两段命名区间裁出来，元素还在视口外时动画不会「提前跑完」。两个顺序坑：`animation-timeline` 和 `animation-range` **必须写在 `animation` shorthand 之后**，否则会被 shorthand 重置回默认值；探测时 `@supports` 里必须写 `(animation-range: entry)`，否则会把只实现了半套的浏览器误判为支持。
+
+**对比**：
+
+| 维度 | 老写法（`scroll` + `getBoundingClientRect`） | 现代写法（滚动时间线） |
+| --- | --- | --- |
+| 谁在驱动 | JS 回调，异步且滞后一帧 | 浏览器合成线程，与滚动同步 |
+| 首帧状态 | 要等 JS 跑完才正确 | 布局完成即正确 |
+| 滚动性能 | 每帧读几何，容易触发强制同步布局 | 不读几何，不碰主线程 |
+| 代码量 | 监听 + 计算 + 节流 + 清理 | 几条声明 |
+
+**同一家族的做法**：
+
+| 指南 | 现代方案 | 什么时候用 |
+| --- | --- | --- |
+| 进出场效果（scroll-entry-exit-effects） | 两条 keyframes 配 `view()`，`animation-range: entry, exit` | 列表、卡片随滚动出入视口 |
+| 滚动进度条（scroll-progress-indicator） | `scaleX` 动画绑匿名 `scroll()` | 阅读进度、章节进度 |
+| 滚动叙事（scrollytelling） | 每个区块命名 `view-timeline: --tl-n block`，用 `animation-range` 精修区间 | 图文叙事、数据故事 |
+| 视差滚动（parallax-scroll-effects） | wrapper 上 `view-timeline`，各层挂不同 `translateY` 动画 | 多层背景、氛围页 |
+| 滚动收缩头部（shrinking-header-on-scroll） | `animation-timeline: scroll(block root)` + 固定 range，前 150px 内收高 | 长列表页的 sticky 头 |
+| 滚动位置感知元素（scroll-position-aware-elements） | 容器 `container-type: scroll-state`，`@container scroll-state(scrollable: top)` 显示回顶按钮 | 「回到顶部」、边缘渐隐提示 |
+| 状态感知 sticky 头（state-aware-sticky-headers） | sticky 元素自身做 `scroll-state` 容器，后代用 `@container ... scroll-state(stuck: top)` 换样式 | 吸顶后换深色背景 / 加阴影 |
+| 滚动完成后的效果（scroll-completion-effects） | `await element.scrollIntoView({ behavior: 'smooth' })`，滚动完再执行后续 | 点目录跳转后高亮目标、展开详情 |
+
+不支持时的统一回退是 `IntersectionObserver`（按 `intersectionRatio` 插值）或 `scroll` + `requestAnimationFrame`；**不要**用 scroll-timeline-polyfill，实现不完整且坑多。装饰性效果可以干脆不回退。
+
+动手试试：滚动下面的卡片列表。卡片进入视口时放大淡入、离开时缩小淡出，顶部细条随滚动增长——全程没有一行 `scroll` 事件。
+
+```jsx playground
+export default function App() {
+  const cards = [1, 2, 3, 4, 5, 6, 7, 8];
+  return (
+    <div className="pg-sd">
+      <div className="pg-sd-bar" />
+      <div className="pg-sd-scroller">
+        {cards.map((n) => (
+          <div className="pg-sd-card" key={n}>卡片 {n}</div>
+        ))}
+      </div>
+      <style>{`
+        .pg-sd { font: 14px/1.6 system-ui, sans-serif; timeline-scope: --pg-sd; }
+        .pg-sd-bar {
+          block-size: 4px; border-radius: 999px; background: #3b82f6; transform-origin: 0 50%; transform: scaleX(0);
+        }
+        .pg-sd-scroller {
+          block-size: 220px; overflow-y: auto; display: grid; gap: 14px;
+          padding-block: 36px; margin-block-start: 8px; scroll-timeline: --pg-sd block;
+        }
+        .pg-sd-card { padding: 18px; border-radius: 10px; background: #eef3ff; color: #1f3b73; }
+        @keyframes pg-sd-in  { from { opacity: 0; scale: .82; } }
+        @keyframes pg-sd-out { to   { opacity: 0; scale: .82; } }
+        @supports ((animation-timeline: view()) and (animation-range: entry)) {
+          .pg-sd-card {
+            animation: pg-sd-in auto linear backwards, pg-sd-out auto linear forwards;
+            animation-timeline: view(block); animation-range: entry, exit;
+          }
+          .pg-sd-bar {
+            transform: scaleX(1); animation: pg-sd-grow auto linear; animation-timeline: --pg-sd;
+          }
+        }
+        @keyframes pg-sd-grow { from { transform: scaleX(0); } }
+        @media (prefers-reduced-motion: reduce) { .pg-sd-card, .pg-sd-bar { animation: none; transform: none; } }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 2.4 吸附：手指还没松手就有反馈
+
+**不加这一步会看到什么**：手机上的卡片轮播，滑到哪一张，下面的小圆点就高亮哪一张。老写法只能监听 `scroll`，事件本身是异步派发的、还滞后一帧；等它算完「谁离中心最近」，用户手指早就松了，甚至已经滑到了下一张——滑动过程中页面毫无反馈。
+
+**最小做法**：让滚动吸附引擎来算。容器加 `scroll-snap-type: x mandatory`，每张卡 `scroll-snap-align: center`，然后监听两个新事件：`scrollsnapchanging` 在手势进行中、浏览器预测出目标时触发；`scrollsnapchange` 在真正落定时触发。
+
+**这段在演示什么**：用 `scrollsnapchanging` 做「预高亮」、用 `scrollsnapchange` 升级成「已选中」。对比一下老写法：只监听 `scroll` 时事件滞后一帧，手指松了才知道停在哪儿。
+
+```js
+/* ❌ 监听 scroll 再算最近项：异步 + 滞后，滑动中没有任何反馈 */
+/* ✅ 吸附预测：手势进行中先给目标，落定时再确认 */
+container.addEventListener('scrollsnapchanging', (event) => {
+  const target = event.snapTargetInline; // 纵向用 snapTargetBlock
+  dots.forEach((dot) => dot.classList.toggle('is-pending', dot.dataset.for === target.id));
+});
+container.addEventListener('scrollsnapchange', (event) => {
+  dots.forEach((dot) => dot.classList.toggle('is-active', dot.dataset.for === event.snapTargetInline.id));
+});
+```
+
+**这段在演示什么**：吸附容器的最小 CSS。`mandatory` 保证一定停在某一屏，`overscroll-behavior-x: none` 防止触发浏览器自身的返回手势。
+
+```css
+.track {
+  display: flex; overflow-x: auto; scroll-snap-type: x mandatory; /* proximity 会停在半路 */
+  overscroll-behavior-x: none;
+}
+.slide { flex: 0 0 100%; scroll-snap-align: center; }
+```
+
+注意这两个事件在页面加载和历史恢复时不会触发，所以初始状态要自己用一次几何计算对齐，不能只依赖事件。
+
+**同一家族的其余做法**：
+
+| 指南 | 现代方案 | 什么时候用 |
+| --- | --- | --- |
+| 吸附实时反馈（scroll-snap-realtime-feedback） | `scrollsnapchanging` 做 pending 高亮，`scrollsnapchange` 升级为 active | 轮播联动圆点、缩略图 |
+| 吸附状态同步（scroll-snap-state-sync） | `scroll-snap-type: y proximity` + 监听 `scrollsnapchange` 同步目录当前项 | 长文目录、章节导航 |
+| 初始滚动目标（scroll-target-on-load） | 元素声明 `scroll-initial-target: nearest`，首屏直接定位 | 日历定位今天、信息流定位未读 |
+| 可滚动性暗示（scrollability-affordance-hints） | `container-type: scroll-state` + 贴边阴影，或 `mask` 渐隐 | 横向列表「右边还有内容」 |
+| 轮播滑片效果（carousel-slide-effects） | 每张滑片绑 `animation-timeline: view(inline)`，一条连续 keyframes 做缩放 | 滑片随位置连续变化 |
+| 吸附高亮（carousel-snap-highlights） | 吸附项做 `scroll-state` 容器，`@container scroll-state(snapped: x)` 放大 | 吸附项视觉强调 |
+| 兄弟错峰动画（dynamic-sibling-animations） | `animation-delay: calc(sibling-index() * 80ms)` 自动错峰 | 列表、网格逐项出现 |
+
+`scroll-initial-target` 解决的是「一进页面就该停在哪」：日历打开定位到今天、信息流打开定位到第一条未读。它只移动视觉视口，不动键盘焦点，是离散定位、没有平滑动画。不支持时在 `DOMContentLoaded` 后补一句 `scrollIntoView({ behavior: 'instant' })`。
+
+### 2.5 手势：必须配「等价按钮」
+
+**不加这一步会看到什么**：移动端列表项左滑露出「删除」，手写 `pointermove` 算位移看起来能跑，但会丢掉惯性、回弹和滚动吸附的手感；更严重的是键盘和读屏用户根本够不着这个功能。
+
+**最小做法**：把每行做成一个横向吸附容器，用滚动引擎模拟滑动手势（惯性、回弹、吸附全是现成的），再用 `IntersectionObserver` 在内容被推走的过程中判断阈值。
+
+**这段在演示什么**：三列网格——左 spacer、内容、右 spacer。内容滑到哪一列，右侧就露出多少动作区，吸附保证它停在整列上；再配一个双阈值 `IntersectionObserver`（0.8 时图标弹一下、0.2 时立即执行），用户不用等滚动完全停下。
+
+```css
+.row.is-ready .track {
+  display: grid;
+  grid-template-columns: 100% 100% 100%; /* 左 spacer｜内容｜右 spacer */
+  overflow: scroll clip;
+  overscroll-behavior-x: none;
+  scrollbar-width: none;
+  scroll-snap-type: x mandatory;
+}
+```
+
+手势类交互有一条无障碍硬线：**任何手势都必须有等价的可见按钮**（WCAG 2.5.1）。滑删要有删除按钮，拖拽要有「上移 / 下移」按钮，下拉要有搜索按钮，而且触控目标至少 24×24px。
+
+| 指南 | 现代方案 | 什么时候用 |
+| --- | --- | --- |
+| 列表拖拽排序（drag-and-drop） | drag handle + `setPointerCapture`，落点用布局中点算，释放时 `moveBefore` + FLIP | 可排序列表 |
+| 滑动删除（swipe-to-remove） | 横向 snap 容器 + 双阈值 `IntersectionObserver` | 消息列表、待办 |
+| 可拖拽浮层（drag） | 专用 handle + `position: fixed` + clamp 辅助函数 | 悬浮窗、画中画 |
+| 滑动展开（swipe-to-reveal） | 外层 snap 容器，内容 snap start、动作面板 snap end | 露出操作按钮但不自动执行 |
+| 下拉露出（pull-to-reveal） | 隐藏搜索栏放滚动容器顶部 + `scroll-initial-target` 盖住 | 下拉搜索 |
+| 二维平移（2d-panning） | `touch-action` + Pointer Events（scroll-axis-lock 仍属易变特性） | 画布、地图 |
+| 指针聚光灯内容展开（interactive-content-reveal） | `mask-image: radial-gradient(...)` + `@property` 注册尺寸变量 | 视觉增强，内容默认必须完整可见 |
+
+## 🔴 高阶：边界、性能与降级
+
+### 兼容性地图
+
+| 特性 | 最低版本（Baseline） | 不支持时怎么办 |
+| --- | --- | --- |
+| `transition-behavior` / `@starting-style` | Chrome 117、Safari 17.4、Firefox 129（2024-08） | 进门动画退化为瞬时出现；需要退场时拆成「先加 closing class，等动画结束再删节点」 |
+| View Transitions（同文档） | Chrome 111、Safari 18、Firefox 144（2025-10） | `if (!document.startViewTransition)` 直接更新 DOM |
+| View Transitions（跨文档） | Chrome 126、Safari 18.2，Firefox 不支持 | 纯渐进增强，退化为标准导航；用 `'onpagereveal' in window` 探测 |
+| `linear()` 缓动 | Chrome 113、Safari 17.2、Firefox 112（2023-12） | 先写 `ease-out` 再覆盖，老浏览器用前者 |
+| 滚动驱动动画 | Chrome 115、Safari 26、Firefox 159（2026-10） | `IntersectionObserver` 或 `scroll` + rAF 复刻 |
+| `scrollsnapchange` / `scrollsnapchanging` | Chrome 129、Edge 129，Firefox/Safari 不支持 | `scroll` + `scrollend`（或 100ms 防抖）+ 最近项几何计算 |
+
+### 性能代价：合成层不是免费的
+
+`transform` 和 `opacity` 走合成器，但把一个元素提升成合成层要占显存。同一个页面里同时出现几十个大图层的动画，低端机反而会因为显存压力掉帧——「用了 transform 就快」是个只对了一半的结论。
+
+**这段在演示什么**：`will-change` 的两种用法——❌ 常驻声明（把全站卡片都提层，几十个图层一起抢显存）；✅ 交互前后临时声明，并用 `transitionend` 收回，让浏览器有机会释放图层。
+
+```css
+/* ❌ 每个卡片都常驻提层 */
+.card { will-change: transform; }
+
+/* ✅ 只在真的要动之前加 */
+.card.is-animating { will-change: transform; }
+```
+
+```js
+el.classList.add('is-animating');
+el.addEventListener('transitionend', () => {
+  el.classList.remove('is-animating'); // 图层可以还给浏览器
+}, { once: true });
+```
+
+另外两条经验：`filter: blur()` 和 `backdrop-filter` 的代价远高于 `opacity`，大区域上慎用；`view-transition` 会给整页拍快照，页面特别长时快照本身就是成本，列表页上千节点应直接跳过过渡。
+
+### 降级与 reduced-motion
+
+`prefers-reduced-motion` 有两种正确策略，二选一，**禁止**全局写 `animation-duration: 0.01ms`——那会让某些动画变得更刺眼，还会让依赖 `animationend` 的清理逻辑永远等不到事件。
+
+**这段在演示什么**：策略一「默认静态，只给接受动效的用户开」，策略二「保留动画，只把参数放缓」，两者按场景选一个。
+
+```css
+/* 策略一：默认静态 */
+.spinner { opacity: 1; }
+@media (prefers-reduced-motion: no-preference) {
+  .spinner { animation: spin 1s linear infinite; }
+}
+
+/* 策略二：保留动画，只放缓 */
+@media (prefers-reduced-motion: reduce) {
+  .progress:not([value]) { animation-duration: 20s; }
+}
+```
+
+**这段在演示什么**：JS 侧配套——被 reduced-motion 关掉的动画永远不会触发 `animationend`，所以「等动画结束再删元素」的代码要先看 `getAnimations()` 是否为空。
+
+```js
+async function closeWithMotion(el) {
+  el.classList.add('is-closing');
+  const animations = el.getAnimations();
+  if (animations.length === 0) { el.remove(); return; } // 用户关了动效，直接删
+  await Promise.allSettled(animations.map((a) => a.finished));
+  el.remove();
+}
+```
+
+无障碍还有三条硬线：持续超过 5 秒的自动动效必须提供可见暂停按钮（WCAG 2.2.2）；闪烁不得超过每秒 3 次（WCAG 2.3.1）；动画关闭后元素必须停在最终状态，不能停在 `opacity: 0` 里把内容藏没。
+
+## 📋 决策速查
+
+| 你想要的效果 | 用什么 | Baseline | 注意事项 |
+| --- | --- | --- | --- |
+| 元素 hover / 点击的位移动画 | `translate` + `transition` | Widely | 只动 `opacity` / `transform` |
+| 弹窗、提示条「长出来」 | `@starting-style` + `allow-discrete` | 2024-08 | `@starting-style` 只管进入 |
+| 弹簧、回弹手感 | `linear()` 停靠点 | Widely | 必须显式给 `duration`；别用在 `opacity` |
+| 列表点进详情的共享元素 | `view-transition-name` + `startViewTransition` | 2025-10 | 同一 name 前后态各只能有一个 |
+| 整站 MPA 页面转场 | `@view-transition { navigation: auto }` | Chrome 126 / Safari 18.2 | Firefox 退化，纯增强；首屏可配 `rel="expect"` 防闪 |
+| 元素随滚动进出场 | `animation-timeline: view()` | 2026-10 | `animation-range` 写在 shorthand 之后 |
+| 阅读进度条 | `animation-timeline: scroll()` | 2026-10 | 用 `scaleX` 不用 `width` |
+| 轮播滑到一半就高亮 | `scrollsnapchanging` | Chrome 129 / Edge 129 | 加载时需手动同步初始项 |
+| 一进页面定位到某条 | `scroll-initial-target: nearest` | Chrome 133 | 只动视觉视口，不动焦点 |
+| 滑动手势（删除 / 展开） | snap 容器 + `IntersectionObserver` | Widely | 必须配等价可见按钮 |
+
+**这段在演示什么**：一份可以整段抄走的最小骨架，把「便宜属性 + 进出场 + 降级」三件事一次写全。
+
+```css
+.toast {
+  opacity: 1; translate: 0 0;
+  transition: display .3s, opacity .3s, translate .3s ease-out;
+  transition-behavior: allow-discrete;
+}
+@starting-style { .toast { opacity: 0; translate: 0 -12px; } }
+.toast[hidden] { display: none; opacity: 0; translate: 0 -12px; }
+@media (prefers-reduced-motion: reduce) { .toast { transition-duration: 0s; } }
+```
+
+**这段在演示什么**：所有新 API 的统一入口写法——先探测，再决定用原生还是走老路。
+
+```js
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+if (!reduce && document.startViewTransition) {
+  document.startViewTransition(updateDom);
+} else {
+  updateDom(); // 无过渡能力或用户要求减少动效，直接换
+}
+```
+
+## ⚠️ 五个常见坑
+
+1. **把 `transition-behavior` 写进 `transition` shorthand**。老浏览器不认这个值，会丢弃整条规则，结果是连基础的 `opacity` 过渡都没了。它必须独占一行。
+2. **两个元素用了同一个 `view-transition-name`**。导航栏和详情页各写一个 `hero`，浏览器检测到重复会跳过整个过渡，看起来像「什么都没发生」，控制台也不报错。
+3. **`animation-timeline` 写在 `animation` 前面**。shorthand 会把它重置回 `auto`，动画变成按时间播放，滚动时完全没反应。
+4. **用 `animationend` 清理被 reduced-motion 关掉的元素**。动画时长为 0 且不触发事件，元素就永远留在 DOM 里，或者永远关不掉。
+5. **滑动手势没给按钮**。左滑删除只对手势用户可用，键盘和读屏用户完全够不着，直接违反 WCAG 2.5.1；而且手势触发的结果还没写进 live region。
+
+## ✅ 自测三问
+
+1. 一个列表项要做「从列表飞到详情」的过渡，你会给它预先写 `view-transition-name` 吗？为什么？（答案：不会。列表里所有项都命名会撞名，应该点击时临时给被点项加，`finished` 后移除。）
+2. 卡片滚动进入视口时放大，应该用 `animation-timeline: view()` 还是 `scroll()`？两者分别以谁为进度？（答案：`view()` 以元素自身相对滚动容器的可见范围为进度；`scroll()` 以滚动容器整体滚动距离为进度。）
+3. 用户开了「减少动效」，你原来「等动画结束再删节点」的代码会出什么问题？怎么改？（答案：动画被禁用后不触发 `animationend`，节点删不掉；改成先查 `getAnimations()` 是否为空。）
+
+## 关键要点
+
+1. **性能基线**：只动画 `opacity` 与 `transform`；离散状态交给 `transition-behavior: allow-discrete`（独立声明）+ `@starting-style` + `overlay`，大部分场景不再需要 JS 动画库。
+2. **View Transitions 是渐进增强**：每个入口都先 feature-detect，不支持就直接更新 DOM；同名 `view-transition-name` 前后态各只能有一个；过渡结束后路由焦点、清理临时 name。
+3. **滚动驱动动画的探测必须带 `animation-range`**，回退用 `IntersectionObserver`；`animation-timeline` 与 `animation-range` 永远写在 `animation` shorthand 之后。
+4. **reduced-motion 二选一**：默认静态用 `no-preference` 包裹启用，或保留动画只放缓参数；禁止全局 `animation-duration: 0.01ms`。
+5. **手势必须有替代路径**：swipe / drag / pull 一律配可见按钮（WCAG 2.5.1），结果写进页级 `role="status"`；吸附事件类新 API 都要做「初始状态同步 + 降级方案」。
+
+## 延伸阅读
+
+- [MDN：View Transitions API](https://developer.mozilla.org/zh-CN/docs/Web/API/View_Transition_API)
+- [MDN：CSS scroll-driven animations](https://developer.mozilla.org/zh-CN/docs/Web/CSS/CSS_scroll-driven_animations)
+- [MDN：prefers-reduced-motion](https://developer.mozilla.org/zh-CN/docs/Web/CSS/@media/prefers-reduced-motion)
+
+---
+
+← 上一章：[02 CSS 布局与响应式](/web/02-css-layout-responsive) ｜ 下一章：[04 表单与输入](/web/04-forms)

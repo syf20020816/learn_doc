@@ -1,0 +1,639 @@
+---
+title: 05 · 组件与 UX 模式
+description: 从 details、popover、dialog 三块原生积木出发，逐步拼出手风琴、菜单、Tabs、抽屉与 Toast——把状态、键盘、焦点、关闭这四件苦差事交还给浏览器。
+---
+
+# 第 5 章 组件与 UX 模式
+
+> **难度**：🟡 进阶 ｜ **前置**：[01 HTML 交互](/web/01-html-interactive)、[02 CSS 布局与响应式](/web/02-css-layout-responsive) ｜ **学完你能**：用几行原生标记做出可键盘操作的菜单、抽屉与 Toast，并说清哪些组件根本不该自己写。
+
+**这一章要解决的毛病**
+
+- 自己写的下拉菜单，点页面别处关不掉；Tab 一路跑进菜单背后的内容里，读屏顺序也跟着乱。
+- 手风琴、Tabs 各写了二三百行 JS，方向键、Esc、关闭后焦点归位仍然漏一半。
+- Toast 一弹出焦点就被抢走，读屏用户只听见「已完成」，不知道是什么完成了。
+- 菜单明明设了很大的 `z-index`，进了父级 `overflow: hidden` 的卡片还是被裁掉一截。
+
+根因是同一件事：**组件不是「一堆 `div` 加 click 监听」，而是状态、键盘、焦点、关闭四件事的组合**。这四件事过去全要自己写，现在浏览器接走了大部分。下面按「同一批原生积木，能拼的东西越来越多」推进：先单独认识 `details`、`popover`、`dialog`，再把它们组装成菜单、抽屉、Toast。
+
+## 🟢 入门：先让它跑起来
+
+### 1.1 最小的可展开组件：`details` + `summary`（accordion）
+
+**没它会怎样**：你写了个 `.panel` 加 click 切换类名，鼠标点着挺好。键盘用户 Tab 到标题按回车——没反应，因为这个 `div` 压根不在 Tab 序列里；读屏器把它念成一段普通文字，「能不能点」「现在是开是关」全丢了。
+
+这段代码演示「可折叠的一块内容」交给浏览器后长什么样：
+
+```html
+<section aria-labelledby="faq-title">
+  <h2 id="faq-title">常见问题</h2>
+  <details>
+    <summary>如何重置密码？</summary>
+    <p>在设置页点击「发送重置邮件」，链接 10 分钟内有效。</p>
+  </details>
+  <details>
+    <summary>支持哪些浏览器？</summary>
+    <p>最近两个大版本的主流浏览器。</p>
+  </details>
+</section>
+```
+
+**浏览器做了什么**：`summary` 被映射成「按钮 + 展开/收起」的复合语义，读屏会念「如何重置密码？按钮，已折叠」。`open` 属性是唯一状态源——删掉就收起，加上就展开，不需要另存一个 JS 布尔值。`summary` 天生在 Tab 序列里，Enter 和 Space 都能切换，焦点也不用你送。展开的内容由浏览器生成在 `::details-content` 这个内部盒子里，所以「标题」和「内容」从结构上就是分开的。
+
+**对比**：
+
+| 维度 | 老写法：`div` + click | 现代写法：原生 `details` |
+| --- | --- | --- |
+| 键盘 | 自己补 `tabindex`、Enter/Space 分支 | 自带 |
+| 状态 | 自己维护 `aria-expanded` 再同步类名 | `open` 属性即状态 |
+| 读屏器 | 常被念成普通文本 | 按钮 + 展开态 |
+| 代码量 | 30~60 行 JS + 一套状态同步 | 0 行 |
+
+一个最容易写坏的细节：**不要把 `h3` 塞进 `summary` 里**。`summary` 本身已被映射成按钮，里面的标题语义会被吞掉，读屏只剩按钮名，页面的标题大纲也断了。需要标题就给外层加 `aria-labelledby`，标题放外面——上面的例子就是这种写法。
+
+### 1.2 互斥与开合动画也不用你管（accordion）
+
+**没它会怎样**：FAQ 三项能同时展开，页面被撑得很长；想做「一次只开一个」，你得监听 `toggle`、遍历所有兄弟节点、逐个删 `open`。想加动画更麻烦——收起的元素高度是 `auto`，过渡对 `auto` 不生效，只能每次量 `scrollHeight` 写死像素值。
+
+这段代码演示「互斥 + 动画」两件事如何各用一个声明解决：
+
+```html
+<details name="faq" open><summary>如何重置密码？</summary><p>…</p></details>
+<details name="faq"><summary>支持哪些浏览器？</summary><p>…</p></details>
+<details name="faq"><summary>能离线使用吗？</summary><p>…</p></details>
+```
+
+```css
+details::details-content {
+  interpolate-size: allow-keywords;   /* 让 auto 也能参与过渡 */
+  overflow: clip;                     /* 收起时内容不溢出 */
+  block-size: 0;
+  transition: block-size .3s, content-visibility .3s;
+  transition-behavior: allow-discrete; /* 必须单独写，塞进简写会失效 */
+}
+details[open]::details-content { block-size: auto; }
+```
+
+**浏览器做了什么**：相同的 `name` 把多个 `details` 归成一组，展开新的自动收起旧的，互斥状态由浏览器维护。`::details-content` 是真正的内容盒：收起时靠 `content-visibility: hidden` 隐藏，**但仍然能被页内查找命中**（Ctrl/⌘+F 搜到会临时展开它）。`interpolate-size: allow-keywords` 把 `auto` 变成一个可插值的值；`transition-behavior: allow-discrete` 让 `content-visibility` 这种「离散属性」也按时间轴切换，否则它是瞬间跳变的。
+
+**对比**：
+
+| 维度 | 老写法：自研手风琴 | 现代写法：`details[name]` |
+| --- | --- | --- |
+| 互斥 | 监听 `toggle` 再遍历兄弟节点 | 一个属性 |
+| 动画 | 量 `scrollHeight` 写死高度 | CSS 过渡，内容变高自适应 |
+| 页内查找 | 收起内容搜不到 | 仍可搜到 |
+| 降级 | 脚本挂了就全瘫 | 不支持时退化成非互斥，仍可用 |
+
+下面这个 playground 就是最小的互斥手风琴。删掉三个 `name` 再点一遍，会看到多项同时展开的「事故现场」。
+
+```jsx playground
+export default function App() {
+  const faqs = [
+    ['给多个 details 同一个 name 会怎样？', '浏览器保证同组内同时只展开一项，不需要你监听 toggle 再关别人。'],
+    ['需要自己加方向键吗？', '不要。summary 上的方向键本来就用于滚动内容，劫持它会破坏原生行为。'],
+    ['浏览器不支持时怎么办？', '多项保持展开，退化成可用的非互斥手风琴。'],
+  ];
+  return (
+    <div className="pg-acc">
+      {faqs.map(([q, a]) => (
+        <details name="pg-faq" key={q}>
+          <summary>{q}</summary>
+          <p>{a}</p>
+        </details>
+      ))}
+      <style>{`
+        .pg-acc { display: grid; gap: 8px; font: 14px/1.6 system-ui, sans-serif; }
+        .pg-acc details { background: #fff; border: 1px solid #dfe3ea; border-radius: 10px; padding: 10px 14px; interpolate-size: allow-keywords; }
+        .pg-acc summary { cursor: pointer; font-weight: 600; }
+        .pg-acc details::details-content { block-size: 0; overflow: hidden; transition: block-size .25s ease, content-visibility .25s; transition-behavior: allow-discrete; }
+        .pg-acc details[open]::details-content { block-size: auto; }
+        .pg-acc p { margin: 8px 0 0; color: #4a5262; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 1.3 轻量浮层：`popover` 一次给你层级、关闭与焦点（menu）
+
+**没它会怎样**：下拉菜单写在普通文档流里，`z-index: 9999` 看着够大，可父级有 `overflow: hidden` 时照样被裁掉一截；点页面空白处不关闭；打开后按 Tab，焦点直接走到菜单背后的按钮上；Esc 也没人处理。
+
+这段代码演示一个零 JS 的菜单骨架——按钮和面板靠两个属性连起来：
+
+```html
+<button type="button" popovertarget="actions" aria-haspopup="menu">操作</button>
+<div id="actions" popover>
+  <button type="button">重命名</button>
+  <button type="button">删除</button>
+</div>
+```
+
+**浏览器做了什么**：popover 打开时进入**顶层**（top layer）——一个独立于文档流的绘制层，不参与祖先的层叠上下文，也不受祖先的 `overflow`、`transform`、`filter`、`contain` 裁剪。可以理解为把元素「摘」出来贴在视口最上面画，而 DOM 位置、事件冒泡、CSS 继承仍留在原处。点外部区域或按 Esc 会自动关闭（light dismiss），关闭后焦点回到触发器；`popover="auto"` 还保证同时只有一个打开。
+
+三种取值别混：`auto` 给交互型菜单（点外关、互斥）；`manual` 给 Toast 和引导（不自动关、可共存多个）；`hint` 给 hover 预览（打开时只关掉别的 hint，不影响 `auto`）。
+
+**对比**——三种「弹层」最容易选错：
+
+| 维度 | 自制 `div` | `popover` | `dialog` + `showModal()` |
+| --- | --- | --- | --- |
+| 遮挡 / 裁剪 | 被祖先裁剪，得 portal 到 body | 顶层，天然不被裁 | 顶层 + `::backdrop` 遮罩 |
+| 背景焦点 | 照常可 Tab | 照常可 Tab（本来就是非模态） | 自动 `inert`，Tab 出不去 |
+| Esc | 自己监听并清理 | 自带 | 自带（触发 `cancel` 事件） |
+| 点外关闭 | 全局 click + 判断包含关系 | 自带（`auto`） | 默认不关，需要时配 `closedby` |
+| 滚动锁定 | 手写 `overflow: hidden`，页面宽度跳动 | 不锁（也不该锁） | `:modal` + `overscroll-behavior` |
+| 无障碍语义 | 要自己补 role | 无对话框语义，仍是普通元素 | `role="dialog"` + 模态语义 |
+| 焦点归还 | 自己记 `document.activeElement` | 自动回触发器 | 自动回打开前的元素 |
+
+## 🟡 进阶：组合起来解决真实场景
+
+### 2.1 场景一：菜单点外可关、Esc 后焦点回按钮（menu）（navbar）
+
+需求：顶栏「更多」按钮打开操作菜单，桌面贴在按钮下方，窄屏变成整宽面板；键盘打开时要能直接 Tab 进第一项，Esc 关闭后焦点回到按钮。
+
+方案：`popovertarget` 声明开关，CSS 锚点定位把菜单钉在按钮下，`position-try-fallbacks` 处理贴边翻转；脚本只补一件浏览器不管的事——键盘打开时把焦点送进菜单。
+
+```html
+<header class="site-header">
+  <a href="/" class="logo">RTC 学习站</a>
+  <button type="button" class="menu-btn" popovertarget="site-menu" aria-haspopup="menu">更多</button>
+  <div id="site-menu" popover role="menu" aria-label="更多操作">
+    <a role="menuitem" href="/api">API 文档</a>
+    <a role="menuitem" href="/guide">学习路线</a>
+  </div>
+</header>
+```
+
+```css
+#site-menu {
+  position-area: block-end span-inline-end;   /* 相对触发器：下方、右对齐 */
+  position-try-fallbacks: flip-block, flip-inline; /* 贴边自动翻到另一侧 */
+  inset: auto;                                /* 清掉 popover 默认的居中定位 */
+  margin-block-start: 8px;
+  inline-size: min(90dvw, 20rem);
+}
+```
+
+**浏览器做了什么**：锚点定位（anchor positioning）让弹层用「相对某个元素的位置」来布局，滚动、缩放时浏览器自己重算，不用你监听 `scroll` 再 `getBoundingClientRect()`。`flip-block` / `flip-inline` 是回退策略：下方放不下就翻到上方，右侧放不下就翻到左侧。
+
+**对比**：
+
+| 维度 | 老写法：自研 Portal 菜单 | 现代写法 |
+| --- | --- | --- |
+| 定位 | 每次滚动/缩放重算坐标 | 锚点定位 + 翻转回退 |
+| 关闭 | 三套监听（click / Esc / 失焦） | `popover="auto"` 自带 |
+| 焦点 | 手动记录 + 手动还原 | 关闭自动归还，只补「打开时移焦」 |
+| 窄屏 | 另写一套移动端菜单 | 同一个元素换个 `position-area` |
+
+只有键盘打开的场次需要移焦（鼠标点击后焦点已经在按钮上，用户下一步自然按 Tab）；这也是「脚本只补浏览器覆盖不到的部分」的典型例子：
+
+```js
+const trigger = document.querySelector('.menu-btn');
+const menu = document.getElementById('site-menu');
+trigger.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  menu.addEventListener('toggle', function onOpen(e) {
+    if (e.newState !== 'open') return;
+    menu.removeEventListener('toggle', onOpen);
+    menu.querySelector('[role="menuitem"]')?.focus();
+  });
+});
+```
+
+下面这个 playground 演示完整行为：点外部关闭、Esc 关闭、关闭后焦点回到触发按钮，全部由浏览器负责。
+
+```jsx playground
+import { useState } from 'react';
+
+export default function App() {
+  const [log, setLog] = useState('还没打开过');
+  return (
+    <div className="pg-menu">
+      <button className="pg-menu-btn" popovertarget="pg-actions" aria-haspopup="menu">
+        操作 ▾
+      </button>
+      <div
+        id="pg-actions" popover="auto" role="menu" aria-label="演示菜单"
+        onToggle={(e) => setLog(e.newState === 'open' ? '已打开：试试点空白处或按 Esc' : '已关闭，焦点回到了触发按钮')}
+      >
+        <button role="menuitem" onClick={() => setLog('执行了：重命名')}>重命名</button>
+        <button role="menuitem" onClick={() => setLog('执行了：删除')}>删除</button>
+      </div>
+      <p className="pg-menu-log">{log}</p>
+      <style>{`
+        .pg-menu { display: grid; gap: 10px; justify-items: start; font: 14px/1.6 system-ui, sans-serif; }
+        .pg-menu-btn { padding: 8px 16px; border: 1px solid #c8ccd4; border-radius: 8px; background: #fff; cursor: pointer; font: inherit; }
+        .pg-menu [popover] { margin: 6px 0 0; padding: 6px; border: 1px solid #dfe3ea; border-radius: 10px; box-shadow: 0 10px 30px rgb(0 0 0 / .12); }
+        .pg-menu [popover] button { display: block; inline-size: 100%; text-align: start; padding: 8px 12px; border: 0; border-radius: 6px; background: none; cursor: pointer; font: inherit; }
+        .pg-menu [popover] button:hover { background: #eef2ff; }
+        .pg-menu-log { margin: 0; color: #4a5262; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 2.2 场景二：Tabs 的键盘漫游不该你写（tabs）
+
+需求：一排标签，左右方向键在标签间移动，整组只占一个 Tab 停靠点；切到哪个标签就显示哪个面板。
+
+老写法的典型账本：每个标签都 `tabindex="0"`，用户想跳过 Tabs 得按 4 次 Tab；方向键要写 4 个分支；`aria-selected`、面板显隐、焦点环要三处同步，少一处就错。
+
+这段代码演示后，先把结构写在 HTML 里，状态和键盘交给浏览器：
+
+```html
+<div class="tabs" focusgroup="tablist nomemory" aria-label="Web 平台技术">
+  <button type="button" aria-selected="true" focusgroupstart>HTML</button>
+  <button type="button" aria-selected="false">CSS</button>
+  <button type="button" aria-selected="false">JavaScript</button>
+</div>
+<div role="tabpanel" tabindex="0">HTML 面板</div>
+<div role="tabpanel" hidden="until-found">CSS 面板</div>
+```
+
+**浏览器做了什么**：`focusgroup` 把一组成员变成一个「漫游组」——组内只有一项进入 Tab 序列，方向键在组内移动，从而把 4 个 Tab 停靠点压缩成 1 个。`focusgroupstart` 标记默认落点。`hidden="until-found"` 让隐藏面板仍能被页内查找命中，命中时自动显示，而不是像 `display: none` 那样彻底消失。
+
+**对比**：
+
+| 维度 | 老写法：全手写 | 现代写法 |
+| --- | --- | --- |
+| Tab 停靠点 | 每项都 `tabindex="0"`，成 Tab 黑洞 | 整组 1 个 |
+| 方向键 | 4 个 keydown 分支 + 边界环绕 | `focusgroup="tablist"` |
+| 脚本没跑起来 | 三个面板同时显示 | 结构写死在 HTML 里，不会堆叠 |
+| 兼容 | — | `focusgroup` 目前仅 Chromium 150+，需 polyfill 或退回 roving tabindex |
+
+两个边界要知道：`focusgroup` 缺失时可以条件加载 polyfill，或退回手写「只有当前项 `tabindex="0"`」的 roving tabindex；`hidden="until-found"` 不等于 `display: none`，面板的内边距和边框仍会渲染，所以样式要写在面板内的包裹层上。
+
+### 2.3 场景三：抽屉别手写焦点陷阱（navigation-drawer）
+
+需求：移动端汉堡按钮打开侧滑抽屉，背景不可操作，Esc 关闭，关掉后焦点回汉堡按钮。
+
+方案：模态 `<dialog>` + `showModal()`。**它一次给你三件套**：①进入顶层并生成 `::backdrop` 遮罩；②外部内容自动 `inert`，Tab 被限制在抽屉里；③关闭时焦点自动回到打开前的元素，Esc 触发 `cancel`。
+
+```html
+<dialog id="drawer" aria-label="站点导航">
+  <nav><ul><li><a href="/web">前端</a></li><li><a href="/rtc">RTC</a></li></ul></nav>
+  <button type="button" commandfor="drawer" command="close">关闭</button>
+</dialog>
+```
+
+```js
+const drawer = document.getElementById('drawer');
+document.querySelector('.hamburger').addEventListener('click', () => {
+  drawer.showModal(); // 外部内容自动 inert，Tab 被限制在抽屉内
+});
+// 手指滑动关闭：面板与空位两个 scroll-snap 停靠点，
+// 完全离屏后再 close()，否则关闭动画会被截断
+new IntersectionObserver(([entry]) => {
+  if (!entry.isIntersecting) drawer.close();
+}, { threshold: 0 }).observe(drawer.querySelector('.Drawer-panel'));
+```
+
+**对比**：
+
+| 维度 | 老写法 | 现代写法 |
+| --- | --- | --- |
+| 背景惰化 | 给主内容加 `inert`、算焦点环、监听 Tab 越界 | `dialog.showModal()` 一行 |
+| 滚动锁 | `body { overflow: hidden }`，页面宽度跳动 | `:modal` + `overscroll-behavior: contain` |
+| 方向键 / Esc | 手写按键分支 | 浏览器内置 |
+| 关闭还原 | 记上一个焦点再手动 `.focus()` | 自动归还 |
+
+下面这个 playground 演示 `showModal()` 的三件事：背景点不动、Tab 出不去、关闭后焦点回来。打开抽屉后先按 Tab 绕圈，再关掉看焦点落在哪。
+
+```jsx playground
+import { useRef, useState } from 'react';
+
+export default function App() {
+  const dialogRef = useRef(null);
+  const [count, setCount] = useState(0);
+  return (
+    <div className="pg-drawer">
+      <button className="pg-drawer-btn" onClick={() => dialogRef.current?.showModal()}>
+        打开抽屉
+      </button>
+      <p className="pg-drawer-msg">背景按钮点击计数：{count}</p>
+      <p className="pg-drawer-msg">抽屉打开时点不到它，Tab 也绕不出去。</p>
+      <dialog ref={dialogRef} className="pg-drawer-dialog" aria-label="抽屉演示">
+        <h3>站点导航</h3>
+        <button className="pg-drawer-btn" onClick={() => setCount((n) => n + 1)}>抽屉内 +1</button>
+        <button className="pg-drawer-btn" onClick={() => dialogRef.current?.close()}>关闭</button>
+      </dialog>
+      <style>{`
+        .pg-drawer { display: grid; gap: 8px; justify-items: start; font: 14px/1.6 system-ui, sans-serif; }
+        .pg-drawer-btn { padding: 8px 16px; border: 1px solid #c8ccd4; border-radius: 8px; background: #fff; cursor: pointer; font: inherit; }
+        .pg-drawer-msg { margin: 0; color: #4a5262; }
+        .pg-drawer-dialog { border: 0; border-radius: 14px; padding: 24px; inline-size: min(80dvw, 22rem); box-shadow: 0 16px 50px rgb(0 0 0 / .2); }
+        .pg-drawer-dialog[open] { display: grid; gap: 10px; }
+        .pg-drawer-dialog::backdrop { background: rgb(15 18 26 / .45); }
+        .pg-drawer-dialog:modal { overscroll-behavior: contain; }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 2.4 场景四：反馈既要看得见，也要听得见（persistent-toast-notifications）（copy-button）
+
+需求：点「保存」后右下角出现通知，带一个「撤销」，用户不点就不消失；复制代码后气泡显示「已复制」。
+
+方案：Toast 用 `popover="manual"`（不自动关、可共存多个）+ `role="status"`；复制按钮用 `command="--copy"` 声明目标，全页一个监听器统一处理。
+
+```html
+<div role="region" aria-label="通知">
+  <div popover="manual" class="toast" id="toast-saved">
+    已保存草稿
+    <button type="button" commandfor="toast-saved" command="hide-popover">撤销</button>
+  </div>
+</div>
+
+<span class="copy">
+  <button type="button" command="--copy" commandfor="snippet" aria-label="复制代码"></button>
+  <span class="tip" role="status"></span> <!-- 气泡本身就是播报区 -->
+</span>
+<pre><code id="snippet">display: grid;</code></pre>
+```
+
+```js
+// command 事件不冒泡，捕获阶段挂在 document 上做统一委托
+document.addEventListener('command', async (event) => {
+  if (event.command !== '--copy') return;
+  const text = event.target.innerText.trim();
+  try {
+    await navigator.clipboard.writeText(text);
+    event.source.nextElementSibling.textContent = '已复制';
+  } catch {
+    event.source.nextElementSibling.textContent = '复制失败，请手动复制'; // 失败也要可见
+  }
+}, true);
+```
+
+**对比**：
+
+| 维度 | 老写法：`div` + `setTimeout` | 现代写法：`popover` |
+| --- | --- | --- |
+| 层级 | 被父级裁剪，得 portal | 顶层 |
+| 关闭 | 只有计时器，读屏用户来不及读完 | 手动关闭优先，时间只作兜底 |
+| 多通知 | 绝对定位互相盖住 | `manual` 可共存堆叠 |
+| 焦点 | 弹出时抢焦点，打断用户 | 不抢，用 `role="status"` 播报 |
+
+Toast 的三条纪律：内容用 `aria-live` 或 `ariaNotify()` 播报，而不是抢焦点；toast 里不放别处没有的操作（它会消失）；模态对话框打开期间抑制 toast（外部已 `inert`，播报会被吞）。带 `role="status"` 的气泡要用 `opacity` 显隐，别用 `display: none`——那会把它移出无障碍树，读屏器就不播报了。
+
+下面 playground 演示「不抢焦点、可撤销、可堆叠」。
+
+```jsx playground
+import { useState } from 'react';
+
+export default function App() {
+  const [items, setItems] = useState([]);
+  const save = () => setItems((list) => [...list, { id: Date.now() + Math.random(), text: '已保存草稿' }]);
+  const undo = (id) => setItems((list) => list.filter((item) => item.id !== id));
+  return (
+    <div className="pg-toast">
+      <button className="pg-toast-btn" onClick={save}>保存草稿</button>
+      <p role="status" className="pg-toast-status">{items.length} 条未处理通知</p>
+      <div className="pg-toast-stack">
+        {items.map((item) => (
+          <div key={item.id} className="pg-toast-item">
+            <span>{item.text}</span>
+            <button onClick={() => undo(item.id)}>撤销</button>
+          </div>
+        ))}
+      </div>
+      <style>{`
+        .pg-toast { display: grid; gap: 12px; justify-items: start; font: 14px/1.6 system-ui, sans-serif; }
+        .pg-toast-btn { padding: 8px 16px; border: 1px solid #c8ccd4; border-radius: 8px; background: #fff; cursor: pointer; font: inherit; }
+        .pg-toast-status { margin: 0; color: #4a5262; }
+        .pg-toast-stack { display: grid; gap: 8px; inline-size: 100%; }
+        .pg-toast-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-radius: 10px; background: #12203a; color: #fff; animation: pg-toast-in .2s ease; }
+        .pg-toast-item button { border: 1px solid rgb(255 255 255 / .4); background: none; color: inherit; border-radius: 6px; padding: 2px 10px; cursor: pointer; font: inherit; }
+        @keyframes pg-toast-in { from { opacity: 0; transform: translateY(6px); } }
+        @media (prefers-reduced-motion: reduce) { .pg-toast-item { animation: none; } }
+      `}</style>
+    </div>
+  );
+}
+```
+
+### 2.5 还有一打模式，先查表再决定写不写
+
+同一族指南按「什么时候用」查表，比从零设计快得多（navbar）（menu）（app-menus）（stack-drill-down）：
+
+| 指南 | 关键做法 | 什么时候用 |
+| --- | --- | --- |
+| （navbar） | 一个 `<nav>` 两形态：窄屏列表是 `popover`，宽屏测量 `scrollWidth` 后移除 popover 变行内 | 站点主导航，不想硬编码断点 |
+| （menu） | `focusgroup="menu nomemory"` 让浏览器推断 `menuitem` 角色并处理方向键 | 操作菜单、命令列表 |
+| （app-menus） | `role="menubar"` + roving tabindex，左右键在顶层菜单间切换、悬停即预览 | File/Edit 式应用菜单，不用于站点导航 |
+| （stack-drill-down） | 横向 scroll-snap，一屏一个视图，`scrollsnapchange` 作为状态唯一事实源 | 移动端逐级下钻 |
+
+还有三个小配件：面包屑用 `<nav>` + `<ol>`，分隔符由 `li + li::before` 生成并对读屏隐藏（breadcrumbs）；工具栏用 `role="toolbar"` + `focusgroup="toolbar wrap"` 获得单 Tab 停靠（toolbar）；长文档目录高亮用 `scroll-target-group: auto`，浏览器自动给当前锚点挂 `:target-current`（scrollspy）。
+
+反馈类组件也一样，先看这张表（persistent-app-tours）（spinner）（progress）（progress-ring）（hovercard）：
+
+| 指南 | 现代方案 | 一句话提醒 |
+| --- | --- | --- |
+| （persistent-app-tours） | 引导步骤 = `popover="manual"` + 锚点定位钉在被解释的功能旁 | 打开后必须把焦点移入，内容要自包含 |
+| （spinner） | `<progress>` 不带 `value` 即不确定态，`conic-gradient()` 画环 | 强制色彩模式会删渐变，需 `forced-color-adjust: none` |
+| （progress） | `<progress>` 自带 `progressbar` 语义，`accent-color` 换色 | 定制时必须 `appearance: none`，完成用 `role="status"` 播报 |
+| （progress-ring） | `conic-gradient` + `@property` 注册 `--value` 做平滑过渡 | 中心百分比加 `aria-hidden`，否则读两遍 |
+| （hovercard） | `interestfor` 触发 + `popover="hint"` + `position-area` 定位 | 预览只是补充，触发器保持 `<a href>` |
+
+## 🔴 高阶：边界、性能与降级
+
+### 3.1 先看「不支持时会发生什么」，比背版本号有用
+
+组件选型的第一道闸不是「新不新」，而是「我的用户里有多少人打不开」。下面按失败模式来记：
+
+| 特性 | 最低版本 | 不支持时的表现 |
+| --- | --- | --- |
+| `details[name]` | Baseline 2024-09（Safari 17.2+） | 退化为非互斥手风琴，仍可用 |
+| Popover API | Baseline 2025-01 | 弹层变成普通 `div`，既无顶层也不会 light dismiss |
+| `dialog.showModal()` | Widely available | 只能退回 `open` 属性的非模态形态 |
+| Invoker Commands | Baseline 2025-12 | 按钮点了没反应，需补 click 监听 |
+| `focusgroup` | Chromium 150+ | 方向键失效，Tabs 只能靠 Tab 逐个走 |
+| CSS 锚点定位 | 未进 Firefox | 弹层回到视口居中，位置与触发器脱钩 |
+| `::details-content` / `interpolate-size` | 2025-09 / Chromium | 开合瞬时完成，功能不受影响 |
+| `scroll-target-group` | Chromium 140+ | 目录不再自动高亮 |
+| `moveBefore()` | 缺 Safari | 排序只能重排 DOM，焦点会丢 |
+
+一条纪律：**polyfill 必须条件加载**，检测点选在原型上而不是 `window` 上，否则会被一个同名全局变量骗过去：
+
+```js
+if (!Object.hasOwn(HTMLElement.prototype, 'popover')) {
+  import('@oddbird/popover-polyfill');
+}
+if (!('commandForElement' in HTMLButtonElement.prototype)) {
+  import('invokers-polyfill');
+}
+```
+
+### 3.2 滑动与长列表：交给 scroll snap，别自己算偏移（carousel）（card）
+
+需求：轮播一次一张、手指可中断；卡片列表在窄容器里自己换布局。
+
+这段代码演示用滚动容器替代 `translateX`：手势、惯性、中断全由浏览器实现。
+
+```css
+.carousel-track {
+  display: flex;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  overscroll-behavior-x: contain; /* 到头别把整页带着滚 */
+  scrollbar-width: none;
+}
+.carousel-track > * {
+  flex: 0 0 100%;
+  scroll-snap-align: center;
+}
+```
+
+```js
+// 当前第几张从滚动位置反推：索引会漂移，位置不会
+const track = document.querySelector('.carousel-track');
+track.addEventListener('scrollend', () => {
+  const index = Math.round(track.scrollLeft / track.clientWidth);
+  status.textContent = `第 ${index + 1} 张，共 ${track.children.length} 张`;
+});
+```
+
+**对比**：
+
+| 维度 | 老写法：`translateX` + 索引 | 现代写法：scroll snap |
+| --- | --- | --- |
+| 手势 | 自己实现拖拽与惯性 | 浏览器原生，可中断 |
+| 状态 | 索引与视觉可能不同步 | 滚动位置是唯一事实源 |
+| 无障碍 | 焦点随位移错位 | 原生滚动容器，焦点稳定 |
+
+同族两个指南一起记：（carousel）的圆点用 `aria-current`、播报放 `role="status"`，不要用 `::scroll-button()` 这类实验能力；（card）是视觉模式——内容卡用 `<article>`，整卡可点用 `<a>` 包 `<article>` 配 `::after { inset: 0 }` 拉伸链接，其他交互元素抬 `z-index`，选中态用 `:has(:checked)`，尺寸自适应交给容器查询。
+
+### 3.3 数据表：排序只移动行，不要重建（sortable-table）（responsive-table）
+
+需求：点列头排序，行内可能有输入框和焦点；窄屏还要能读。
+
+这段代码演示「状态只写在 `aria-sort`，行只移动不重建」：
+
+```js
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+table.addEventListener('click', (event) => {
+  const button = event.target.closest('th button');
+  if (!button) return;
+  const th = button.closest('th');
+  const dir = th.getAttribute('aria-sort') === 'ascending' ? 'descending' : 'ascending';
+  sortRows([...tbody.rows], th.cellIndex, th.dataset.type, dir)
+    .forEach((row) => tbody.moveBefore(row, null)); // 移动，不重建
+  th.setAttribute('aria-sort', dir);               // 状态只放这里
+  status.textContent = `按 ${button.textContent.trim()} 排序，共 ${tbody.rows.length} 行`;
+});
+```
+
+**对比**：
+
+| 维度 | 老写法：`innerHTML` 重渲染 | 现代写法：移动行 |
+| --- | --- | --- |
+| 焦点 | 全部丢失，回到页面顶部 | 保持原位跟随 |
+| 动画 | 无法做 view transition | `view-transition-name: match-element` 可做 |
+| 排序结果 | 字符串比较，`10` 排在 `9` 前 | `Intl.Collator` 数字感知 |
+| 输入中间态 | 未提交的输入被清空 | 节点还在，值保留 |
+
+窄屏的兜底是容器查询：桌面保持横向滚动 + `position: sticky` 钉住表头；容器变窄时隐藏 `thead`，用 `td::before { content: var(--label) }` 注入列名（responsive-table）。滚动容器要加 `tabindex="0"` + `role="region"` + 可访问名称，否则键盘用户滚不到右侧。
+
+### 3.4 系统 UI 与降噪：能定制就别自建（browser-ui-theming）（dark-mode-toggle）
+
+自建控件的代价是白送语义、键盘、IME 集成。先看这些能定制的点，够用就别写 JS（browser-ui-theming）：
+
+| 定制点 | 方案 |
+| --- | --- |
+| 选中文本 | `::selection` |
+| 品牌色扩散 | `accent-color`（checkbox / radio / 进度条 / 滑块） |
+| 明暗适配 | `color-scheme` + `light-dark()` |
+| 校验态 | `:user-valid` / `:user-invalid`（别用加载即报错的 `:invalid`） |
+| 下拉选择 | `<select>` + `appearance: base-select` + `::picker(select)` |
+| 文件按钮 / 滑块 | `::file-selector-button` / thumb 伪元素 |
+
+主题开关的本质是把用户选择写回 `color-scheme`，但 CSS 声明会盖过 meta，所以必须把 meta 映射成属性（dark-mode-toggle）：
+
+```css
+:root {
+  color-scheme: light dark;
+  &:has(> head > meta[name="color-scheme"][content="dark"]) { color-scheme: dark; }
+  &:has(> head > meta[name="color-scheme"][content="light"]) { color-scheme: light; }
+}
+```
+
+滚动条与图标是另外两个高频定制点：（customize-scrollbar-color-and-thickness）用 `scrollbar-color` + `scrollbar-width`，thumb 与 track 对比不低于 3:1，且 `scrollbar-width` 非 `auto` 时要留替代滚动途径；（adapt-scrollbar-to-contrast-preferences）在 `prefers-contrast: more` 下换成黑白高对比配色，**不要给 `scrollbar-color` 做过渡**（WebKit 会闪）；（icons）把图标当设计令牌，`@property` 注册 `--icon-start`，容器样式查询里用 `mask` + `currentColor` 渲染，状态切换就是换令牌。
+
+降噪有一条可量化的线：持续固定条单行、低于视口高度 12%，合法提示条占视口远小于 15%（content-first-noise-reduction）。最实用的是「下滑隐藏顶栏、上滑带回」，用 scroll-state 查询纯 CSS 完成：
+
+```css
+html { container-type: scroll-state; }
+@container scroll-state((scrolled: bottom) and (scrollable: top)) {
+  .top-bar { transform: translateY(-100%); } /* transform 不改布局，内容不跳 */
+}
+.top-bar:focus-within { transform: none; }   /* 含焦点时必须保持可见 */
+```
+
+最后两条是触感层面的：（form-factor-adaptation）按输入方式定尺寸——24×24 起步、`pointer: coarse` 下 44×44，刘海屏用 `env(safe-area-inset-*)`，固定栏配 `scroll-padding-bottom`；（natural-interactions）每个控件都要有 hover / 按压 / 焦点三态，`:focus-visible` 用 `CanvasText` 画环，绝不 `outline: none` 而无替代。
+
+**SATO 四项自检**（语义 Semantic、可访问 Accessible、主题 Theme、状态可见 Obvious）：每个组件上线前问四句——用了原生语义元素吗？只用键盘能完成全部操作吗？强制色彩模式下还看得见吗？状态变化有没有颜色以外的指示？四问有一问答不上，就先别急着加动效。
+
+## 📋 决策速查
+
+两个最短可用的组合，先记这两段，其余按表查：
+
+```html
+<!-- 菜单：两个属性，零 JS -->
+<button popovertarget="m">更多</button>
+<div id="m" popover><button>重命名</button></div>
+```
+
+```html
+<!-- 模态：一个方法调用，焦点陷阱与 Esc 全包 -->
+<dialog id="d"><p>删除后无法恢复</p><button commandfor="d" command="close">取消</button></dialog>
+```
+
+| 你想实现 | 用什么 | Baseline | 注意 |
+| --- | --- | --- | --- |
+| 可展开的一段内容 | `details` + `summary` | Widely | 标题别塞进 `summary` |
+| 一次只开一项 | `details[name]` | 2024-09 | 不支持时退化为非互斥 |
+| 下拉菜单 / 操作菜单 | `popovertarget` + `popover` | 2025-01 | 样式写 `:is(:popover-open, .\:popover-open)` |
+| 模态抽屉 / 确认框 | `dialog` + `showModal()` | Widely | 不要再手写焦点陷阱 |
+| 关闭按钮无需 JS | `commandfor` + `command` | 2025-12 | 表单内要写 `type="button"` |
+| 组内方向键漫游 | `focusgroup` | Chromium 150+ | 需要 polyfill 兜底 |
+| 弹层贴触发器定位 | 锚点定位 + `position-area` | 缺 Firefox | 翻转用 `position-try-fallbacks` |
+| 持久通知 / Toast | `popover="manual"` + `role="status"` | 2025-01 | 别抢焦点，不用 `display: none` 隐藏 |
+| 滑动轮播 / 下钻 | `scroll-snap` + `scrollend` | Widely | 状态从位置反推 |
+| 长文档目录高亮 | `scroll-target-group` | Chromium 140+ | 高亮镜像到 `aria-current` |
+| 表格排序 | `aria-sort` + `moveBefore()` | 缺 Safari | 移动行，不重建 `tbody` |
+
+## ⚠️ 五个常见坑
+
+1. **拿 `aria-hidden` 当视觉隐藏**。它只把节点移出无障碍树，视觉上还在；反过来，`display: none` 的隐藏面板读屏器也读不到。两者都要隐藏用 `hidden`，只对读屏隐藏用 `sr-only` 工具类。
+2. **把 `hidden="until-found"` 当成 `display: none`**。它仍会渲染内边距和边框，样式要写在面板内的包裹层；同时它可被页内查找命中，别在里面放敏感默认值。
+3. **排序、筛选后重建 DOM**。`innerHTML = ...` 会丢焦点、丢输入中间态、丢过渡；用 `moveBefore()` 移动现有节点。
+4. **弹层用 `z-index` 硬顶**。父级有 `transform`、`overflow: hidden`、`contain` 时怎么调都出不来；交给 popover 的顶层。
+5. **`outline: none` 换美观**。删掉焦点环等于删掉键盘用户的位置感；用 `:focus-visible` + 对比度 3:1 的替代环，别用 `box-shadow`（强制色彩模式会移除）。
+
+## ✅ 自测三问
+
+1. 把鼠标拔掉，只用 Tab / Enter / Esc / 方向键，你能打开菜单、切完 Tabs、关掉抽屉并回到原来的位置吗？
+2. 给页面开启 Windows 高对比（强制色彩）模式，你的菜单边框、选中态、Toast 还在吗？
+3. 把 `details` 的 `name` 删掉、把 popover 的 polyfill 关掉，你的页面还剩多少可用功能？
+
+## 关键要点
+
+- **一个组件只有四件事**：状态、键盘、焦点、关闭。能交给原生元素的一律交出去——`details` 管开合、`popover` 管顶层与 light dismiss、`dialog` 管模态与焦点环。
+- **声明式优先**：`popovertarget`、`commandfor`、`focusgroup`、`interestfor` 把过去几百行脚本压缩成几个属性；脚本只补浏览器覆盖不到的部分：键盘打开时移焦、播报、预览内容。
+- **三种 popover 别混用**：`auto` 给交互菜单，`manual` 给 Toast 和引导，`hint` 给 hover 预览。
+- **滑动类共用一套底座**：轮播、抽屉、下钻都是 scroll snap，`scrollend` / `scrollsnapchange` 是状态同步的事件源。
+- **每个模式写一条回退**：`focusgroup` 只有 Chromium、锚点定位缺 Firefox、`moveBefore` 缺 Safari——一条特性检测或一条回退声明，组件就永远可用。
+
+## 延伸阅读
+
+- [Popover API（MDN）](https://developer.mozilla.org/docs/Web/API/Popover_API) ｜ [Invoker Commands API（MDN）](https://developer.mozilla.org/docs/Web/API/Invoker_Commands_API)
+- [`details` / `summary`（MDN）](https://developer.mozilla.org/docs/Web/HTML/Reference/Elements/details) ｜ [`dialog`（MDN）](https://developer.mozilla.org/docs/Web/HTML/Reference/Elements/dialog)
+- [CSS 锚点定位（MDN）](https://developer.mozilla.org/docs/Web/CSS/CSS_anchor_positioning) ｜ [CSS scroll snap（MDN）](https://developer.mozilla.org/docs/Web/CSS/CSS_scroll_snap)
+- [ARIA Authoring Practices：菜单与 Tabs](https://www.w3.org/WAI/ARIA/apg/patterns/) ｜ [@oddbird/popover-polyfill](https://github.com/oddbird/popover-polyfill)
+
+---
+
+← 上一章：[04 表单与输入](/web/04-forms) ｜ 下一章：[06 无障碍与色彩](/web/06-accessibility)
