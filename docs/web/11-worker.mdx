@@ -1,0 +1,435 @@
+# 11-长任务切分
+
+浏览器主线程一帧≈**约50ms**（目标：单个任务不要超过50ms，避免阻塞、拉高INP）
+
+> 
+> 思路：把一个5s大循环，拆成一小块一小块；每干完一块，主动让出主线程，交给浏览器渲染、响应用户交互，下一帧再继续。
+
+几种主流方案，从简单到工程化：
+
+1. `setTimeout` 分片（最经典，兼容最好）
+2. `requestIdleCallback` 空闲执行（低优先级，不抢占交互）
+3. `queueMicrotask` ❌ 不行：微任务队列会一次性跑完，不会交还给渲染
+4. `scheduler.postTask()`（现代浏览器，优先级可控，最优）
+5. 封装通用分片工具函数（推荐业务使用）
+
+> 
+> 限制：**JS 单线程**，本质不是并行，是时间切片（协作式让出主线程）；CPU密集型终极方案还是 WebWorker。
+
+---
+
+## 方案1：基础版 setTimeout 分片（面试常写）
+
+目标：每批处理一小段，干完 `setTimeout` 让出主线程
+
+```
+/**
+ * 分片执行长任务
+ * @param list 待遍历大数据数组
+ * @param handleItem 单个item处理函数
+ * @param chunkSize 每一批处理多少条（控制单块耗时<50ms）
+ */
+async function runChunkTask<T>(
+  list: T[],
+  handleItem: (item: T) => void,
+  chunkSize: number = 20
+): Promise<void> {
+  let index = 0;
+
+  function next() {
+    // 终止条件
+    if (index >= list.length) return;
+
+    // 取当前分片
+    const end = Math.min(index + chunkSize, list.length);
+    for (; index < end; index++) {
+      handleItem(list[index]);
+    }
+
+    // 让出主线程，下一调度周期继续
+    setTimeout(next, 0);
+  }
+
+  return new Promise((resolve) => {
+    next();
+  });
+}
+
+// 使用
+const bigList = new Array(10000).fill(0);
+runChunkTask(bigList, (item) => {
+  // 这里是你的耗时逻辑
+  const n = Math.sqrt(Math.random() * 999999);
+}, 20).then(() => {
+  console.log('全部任务完成');
+});
+```
+
+⚠️ 缺点：`setTimeout` 有调度延迟（最低4ms左右），调度不够精准。
+
+---
+
+## 方案2：精准控制「每块耗时不超过50ms」（重点！不是按条数，是按时间）
+
+上面是按数量分片，**不稳定**：有的item重、有的轻，有可能某一批跑超50ms。
+✅ 正确做法：**每轮记录开始时间，循环到超时就停止，让出主线程**
+
+```js
+async function runTimeSliceTask<T>(
+  list: T[],
+  handleItem: (item: T) => void
+): Promise<void> {
+  let index = 0;
+  const TIME_LIMIT = 50; // 单块最大执行时间 ms
+
+  return new Promise((resolve) => {
+    function work() {
+      const start = performance.now();
+      // 在50ms窗口内尽可能多处理
+      while (index < list.length && performance.now() - start < TIME_LIMIT) {
+        handleItem(list[index]);
+        index++;
+      }
+
+      if (index >= list.length) {
+        resolve();
+        return;
+      }
+      // 时间到，交还主线程
+      setTimeout(work, 0);
+    }
+    work();
+  });
+}
+
+// 调用
+runTimeSliceTask(bigList, (v) => {
+  // 耗时计算
+  JSON.stringify(v);
+}).then(() => console.log('done'));
+```
+
+👉 这个就是面试标准答案：**基于 performance.now 计时，50ms 时间切片**
+
+---
+
+## 方案3：现代浏览器 Scheduler API `scheduler.postTask`（Chrome 94+，首选）
+
+原生调度API，可以设置优先级 `user-visible` / `user-blocking`，浏览器调度器更智能，比setTimeout好很多
+
+```js
+async function runSchedulerSlice<T>(
+  list: T[],
+  handleItem: (item: T) => void
+): Promise<void> {
+  let index = 0;
+  const TIME_LIMIT = 50;
+
+  async function work() {
+    const start = performance.now();
+    while (index < list.length && performance.now() - start < TIME_LIMIT) {
+      handleItem(list[index]);
+      index++;
+    }
+    if (index >= list.length) return;
+    // 把下一块任务交给浏览器调度器
+    await scheduler.postTask(work, { priority: 'user-visible' });
+  }
+  await work();
+}
+```
+
+> 
+> priority 说明：
+> 
+> 
+> - `user-blocking`：和用户交互同优先级（点击响应）慎用
+> - `user-visible`：默认，可见但不阻塞交互，适合这类分片任务
+> - `background`：最低优先级
+
+---
+
+## 方案4：requestIdleCallback 空闲时执行（适合非紧急后台计算）
+
+只有浏览器空闲的时候才跑，有交互就立刻打断；适合日志、统计、预计算，不适合必须尽快跑完的任务
+
+```js
+async function runIdleTask<T>(list: T[], handleItem: (item: T) => void) {
+  let index = 0;
+  return new Promise((resolve) => {
+    function work(deadline: IdleDeadline) {
+      // deadline.timeRemaining() 浏览器剩余空闲时间
+      while (index < list.length && deadline.timeRemaining() > 0) {
+        handleItem(list[index]);
+        index++;
+      }
+      if (index >= list.length) {
+        resolve();
+        return;
+      }
+      requestIdleCallback(work);
+    }
+    requestIdleCallback(work);
+  });
+}
+```
+
+---
+
+## 方案5：Abort 可控版本（生产必加：支持取消任务）
+
+实际业务经常需要：切换tab、关闭弹窗时终止长任务，防止内存和无效计算
+
+```js
+function runSliceTaskWithAbort<T>(
+  list: T[],
+  handleItem: (item: T) => void,
+  signal: AbortSignal
+): Promise<void> {
+  let index = 0;
+  const TIME_LIMIT = 50;
+  return new Promise((resolve, reject) => {
+    function work() {
+      if (signal.aborted) {
+        reject(new Error('task aborted'));
+        return;
+      }
+      const start = performance.now();
+      while (index < list.length && performance.now() - start < TIME_LIMIT) {
+        handleItem(list[index]);
+        index++;
+      }
+      if (index >= list.length) {
+        resolve();
+        return;
+      }
+      setTimeout(work, 0);
+    }
+    work();
+  });
+}
+
+// 使用
+const controller = new AbortController();
+runSliceTaskWithAbort(bigList, (v) => {}, controller.signal)
+  .catch(e => console.log(e.message));
+
+// 需要取消的时候调用：controller.abort()
+```
+
+---
+
+# ❌ 常见错误写法（面试踩坑点）
+
+1. 用 `Promise.then / queueMicrotask` 循环：微任务队列一次性全部执行完，**不会让出主线程，依然是长任务**
+
+```js
+// ❌ 错误示例，没有分片！
+async function bad() {
+  for(let i=0;i<10000;i++){
+    await Promise.resolve();
+    heavyCalc();
+  }
+}
+```
+
+> 
+> await Promise.resolve() 只是切微任务，渲染帧跑不到，INP 照样炸。
+
+2. 固定条数分片，不计时：单条计算耗时波动，很容易超过50ms阈值。
+
+# ✅ 对比总结
+
+| 方案 | 优点 | 缺点 | 适用场景 |
+| --- | --- | --- | --- |
+| setTimeout + performance计时 | 兼容性拉满，面试首选 | 调度有4ms最小延迟 | 通用业务、面试手写 |
+| scheduler.postTask | 调度精准、优先级可控 | Chrome限定 | 现代内部项目 |
+| requestIdleCallback | 不抢主线程交互 | 时机不可控，很慢 | 后台非紧急计算 |
+| WebWorker | 真正并行，完全不阻塞主线程 | 有通信开销、不能操作DOM | 超大计算量首选 |
+
+# 面试一句话回答版本
+
+> 
+> 对于5s长任务，采用**时间分片**：利用 `performance.now()` 记录每片起始时间，循环处理业务逻辑，一旦单块执行接近50ms阈值，就停止当前批次，通过 setTimeout / scheduler.postTask 让出主线程，交给浏览器渲染和交互响应，下一调度周期继续执行剩下的数据；如果是超大计算优先 WebWorker，分片只是协作式调度，不是并行。
+
+
+---
+
+- `WebWorker`：**另一条线程**，计算完全不阻塞主线程（INP、主线程长任务直接消失）
+- `scheduler.postTask`：**主线程内的协作式时间切片**，依然跑在主线程，只是主动让出、控制优先级
+- `AbortSignal`：**取消信号规范**，是通用控制原语，Worker 和 scheduler 都可以接入
+
+> 
+> 最容易踩的误区：不要想着在 Worker 里面用 scheduler.postTask。
+> ✅ scheduler.postTask 只能在 **主线程** 使用；Worker 上下文没有 `scheduler` 对象。
+
+## 两种组合模式（业务里两种玩法）
+
+### 模式A：Worker 做重计算 + 主线程用 scheduler 调度【推荐组合】
+
+场景：
+Worker 负责 CPU 密集计算；但主线程这边还有一堆配套工作（处理返回结果、渲染、DOM、组装数据），主线程这部分逻辑也很重，需要用 scheduler 分片、控优先级，同时共用一套 AbortSignal 一键取消。
+
+时序：
+
+1. 创建 `AbortController`，拿到 `signal`
+2. 主线程调用 worker.postMessage 下发计算任务，把 `signal` 同步传递标记
+3. Worker 内部监听 `message`，做计算；Worker 内部自己轮询判断 `signal.aborted` 停止计算
+4. Worker 算完抛结果回来
+5. **主线程收到结果后，对结果的 heavy 后处理逻辑交给 `scheduler.postTask` 分片跑，控制单块低于 50ms**
+6. 外部调用 `controller.abort()`：通知 Worker 停止计算 + 主线程 pending 的 scheduler 任务不再执行
+
+> 
+> 注意：`AbortSignal` 不能直接 postMessage 传给 Worker（不能结构化克隆），**只能传一个标记id，或者在主线程监听 abort 事件，再单独发一条 `{type:'abort'}` 消息给 Worker**
+
+示例骨架：
+
+```js
+// 主线程
+const controller = new AbortController();
+const signal = controller.signal;
+
+const worker = new Worker('./calc.worker.ts');
+
+// 下发任务
+worker.postMessage({ type: 'start', payload: bigData });
+
+// 收到Worker计算结果，主线程处理结果（这块容易堵主线程 → scheduler分片）
+worker.onmessage = async (e) => {
+  const resultList = e.data.payload;
+  await processResultChunk(resultList, signal);
+};
+
+// 主线程侧：scheduler.postTask + 时间分片 + abort校验
+async function processResultChunk<T>(list: T[], signal: AbortSignal) {
+  let idx = 0;
+  const LIMIT = 50;
+  async function work() {
+    if (signal.aborted) throw new Error('abort');
+    const start = performance.now();
+    while (idx < list.length && performance.now() - start < LIMIT) {
+      renderItem(list[idx]);
+      idx++;
+    }
+    if (idx >= list.length) return;
+    await scheduler.postTask(work, { priority: 'user-visible', signal });
+  }
+  await work();
+}
+
+// 取消：同时终止Worker计算 + scheduler排队任务
+signal.addEventListener('abort', () => {
+  worker.postMessage({ type: 'abort' });
+});
+
+// 外部取消
+// controller.abort();
+```
+
+worker 侧（calc.worker.ts）
+
+```js
+let running = false;
+self.onmessage = (e) => {
+  if (e.data.type === 'abort') {
+    running = false;
+    return;
+  }
+  if (e.data.type === 'start') {
+    running = true;
+    heavyCalc(e.data.payload);
+  }
+};
+
+function heavyCalc(data: any[]) {
+  for (let i = 0; i < data.length; i++) {
+    if (!running) return; // 收到abort标记立刻退出
+    // 耗时计算
+  }
+  self.postMessage({ payload: data });
+}
+```
+
+👉 亮点：`scheduler.postTask` 原生支持传入 `signal`！一旦 abort，排队中的任务直接 reject，不用自己写判断。这是它相比 setTimeout 分片巨大优势。
+
+### 模式B：只在主线程 scheduler 分片 + AbortSignal（不启用Worker）
+
+适合：**计算量不大、但是会操作DOM，没法丢Worker**，只能主线程跑。
+
+> 
+> 这就是上一轮给你的分片代码升级版，优先选 scheduler，自带 signal 支持。
+
+```js
+async function sliceTask<T>(list: T[], handle: (item:T)=>void, signal:AbortSignal) {
+  let idx = 0;
+  const LIMIT = 50;
+  async function work() {
+    if (signal.aborted) throw new Error('aborted');
+    const s = performance.now();
+    while(idx < list.length && performance.now()-s < LIMIT) {
+      handle(list[idx++]);
+    }
+    if(idx >= list.length) return;
+    await scheduler.postTask(work, { priority: 'user-visible', signal });
+  }
+  await work();
+}
+```
+
+## ❌ 错误搭配：想在 Worker 里面写 scheduler.postTask
+
+```js
+// worker里面，不存在 scheduler 对象！直接报错
+await scheduler.postTask(()=>{}, {});
+```
+
+原因：Scheduler API 属于 **Window 宿主 API**，Worklet / Worker 上下文没有暴露。
+Worker 内部如果任务本身还是很大怎么办？
+Worker 里面**只能自己手动时间分片**（`performance.now()` + 循环判断超时），Worker 没有渲染队列，让出线程没有意义，Worker分片一般只用来：**支持可中断、避免一次性跑死Worker，方便响应abort消息**。
+Worker 内部分片示例（仅用于支持中断）
+
+```js
+// worker内部，自己分片，但是没有scheduler
+async function workerCalcChunk(list: any[]) {
+  let i = 0;
+  const TIME_SLICE = 20;
+  while(i < list.length) {
+    const start = performance.now();
+    while(i < list.length && performance.now() - start < TIME_SLICE) {
+      calc(list[i++]);
+    }
+    // Worker里让出：用 setTimeout，让出worker的事件循环，以便接收abort消息
+    await new Promise(r => setTimeout(r,0));
+  }
+}
+```
+
+> 
+> Worker 的 setTimeout 只是 Worker 内部事件循环调度，**和主线程渲染完全无关**。
+
+## 三者能力对照表
+
+| 能力 | 运行环境 | 核心价值 | 是否支持AbortSignal |
+| --- | --- | --- | --- |
+| WebWorker | 独立线程 | 不阻塞主线程，CPU密集首选 | 需要自己实现标记取消 |
+| scheduler.postTask | 主线程 | 主线程任务优先级调度、时间切片、不阻塞交互 | ✅原生支持signal |
+| AbortSignal | 通用 | 统一取消信号 | ✅标准，到处可以接入 |
+
+## ✅ 什么时候推荐这套组合（Worker + scheduler + Abort）
+
+适合这种典型业务：
+
+1. 原始数据量巨大，解析/计算很重 → 丢 Worker 算，不卡主线程
+2. Worker 返回结果后，要批量渲染、组装DOM、处理视图数据，这一步没法进Worker，而且量大也会卡主线程 → 交给 scheduler.postTask 分片，控制每块低于 50ms
+3. 用户切换面板、关闭弹窗、路由跳转时，需要**一键停止计算，并且停止后续渲染分片任务** → AbortSignal 统一收口
+
+## ⚠️ 几个关键坑点汇总
+
+1. `scheduler.postTask` 的 `signal`：只能取消**还没开始执行**的任务；任务已经跑起来了，它不会强行终止 JS 执行，依然需要你自己在循环内判断 `signal.aborted`。（和所有JS取消一样：协作式取消，不是抢占式）
+2. AbortSignal **不能结构化克隆**，不能直接 postMessage 到 Worker；只能主线程监听 abort，单独发一条 abort 消息通知 Worker。
+3. Worker 中没有 `scheduler`，不要尝试调用。
+4. 如果全部逻辑都是纯计算、不需要DOM：**直接全放Worker，主线程不需要 scheduler**，scheduler 是解决主线程压力的。
+
+## 一句话面试总结
+
+三者可以组合使用，分工明确：WebWorker 承担纯计算，隔离在独立线程避免阻塞主线程；scheduler.postTask 用于主线程后续的 heavy 视图处理逻辑，做优先级调度与时间分片；AbortSignal 作为统一取消信号，既能交给 scheduler 原生控制排队任务，又可以在 abort 触发时发消息通知 Worker 停止计算。但 scheduler API 只能在主线程使用，Worker 上下文不存在该API。

@@ -10,5 +10,6 @@
   "07-performance",
   "08-security-privacy",
   "09-web-components",
-  "10-js-platform-ai"
+  "10-js-platform-ai",
+  "11-worker"
 ]
